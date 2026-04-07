@@ -142,7 +142,8 @@ function renderLogin() {
     <div class="login-wrap">
       <div class="login-card">
         <div class="login-header">
-          <p class="login-title">MCW Client Matcher</p>
+          <img src="logo.png" alt="McNulty Counseling and Wellness" class="login-logo" />
+          <p class="login-title">Clinician Matcher</p>
           <p class="login-sub">Front office scheduling</p>
         </div>
         <form data-action="login-submit">
@@ -175,8 +176,8 @@ function renderSidebar() {
   return `
     <div class="sidebar">
       <div class="sidebar-head">
-        <p class="sidebar-title">MCW Client Matcher</p>
-        <p class="sidebar-sub">Front office scheduling</p>
+        <img src="logo.png" alt="McNulty Counseling and Wellness" class="sidebar-logo" />
+        <p class="sidebar-sub">Clinician Matcher</p>
       </div>
       <div class="sidebar-body">
         <input id="search-input" class="side-input" type="text" placeholder="Search by name…" value="${escapeHtml(state.search)}" data-action="search-input" />

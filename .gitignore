@@ -1,0 +1,15 @@
+# Local Claude Code config — not deployed
+.claude/
+
+# Legacy React source — kept locally for reference, not used by the live site
+MCW_Clinician_Matcher.jsx
+
+# Alternative logo formats — only logo.png is referenced by the app
+logo.webp
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
