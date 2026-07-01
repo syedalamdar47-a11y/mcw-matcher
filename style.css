@@ -154,3 +154,34 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background:
 .admin-row { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; margin-bottom: 8px; }
 .admin-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .admin-row-name { font-weight: 600; font-size: 13px; color: #0f172a; flex: 1; margin: 0; }
+
+/* Footer utility buttons (health / backup / restore) */
+.foot-utils { display: flex; gap: 6px; }
+.foot-utils button { flex: 1; font-size: 11px; background: rgba(255,255,255,0.06); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 6px 4px; cursor: pointer; }
+.foot-utils button:hover { background: rgba(255,255,255,0.14); }
+
+/* Health check panel */
+.audit-ok { text-align: center; color: #16a34a; padding: 28px 0; font-size: 14px; font-weight: 500; }
+.audit-summary { display: flex; gap: 12px; margin-bottom: 14px; font-size: 12px; }
+.audit-count { font-weight: 600; }
+.audit-count.err { color: #b91c1c; }
+.audit-count.warn { color: #b45309; }
+.audit-count.info { color: #1d4ed8; }
+.audit-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; font-size: 12.5px; line-height: 1.4; border: 1px solid; }
+.audit-error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.audit-warn { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+.audit-info { background: #eff6ff; border-color: #bfdbfe; color: #1e40af; }
+.audit-who { font-weight: 700; }
+
+/* Responsive: stack layout on phones/tablets */
+@media (max-width: 768px) {
+  .app-shell { flex-direction: column; height: auto; min-height: 100dvh; overflow: visible; }
+  .sidebar { width: 100%; }
+  .sidebar-body { max-height: 45vh; }
+  .main-pane { overflow: visible; }
+  .cards-area { overflow: visible; padding: 12px; }
+  .cards-grid { grid-template-columns: 1fr; }
+  .main-bar { position: sticky; top: 0; z-index: 5; }
+  .modal { max-height: 92vh; }
+  .sidebar-logo, .login-logo { max-width: 180px; }
+}

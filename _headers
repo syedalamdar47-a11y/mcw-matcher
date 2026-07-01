@@ -1,0 +1,9 @@
+# Netlify security headers. Applied automatically on deploy (ignored by local file preview).
+# CSP allows inline style ATTRIBUTES (the app uses style="..." in templates) but no inline
+# or third-party scripts. When Phase 1 adds Supabase / the Google Sheet fetch, add their
+# origins to connect-src.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer

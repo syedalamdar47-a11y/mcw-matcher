@@ -23,21 +23,26 @@ This document explains how the MCW Client Matcher is deployed and how to push ch
 
 ## Files that get deployed
 
-Only these four files are needed for the site to work:
+These files are needed for the site to work:
 
 | File | Purpose |
 |---|---|
 | `index.html` | Entry point — loads CSS and JS |
 | `style.css` | All styles |
 | `data.js` | Seed clinician data, storage key, and login password |
-| `script.js` | App state, rendering, and event handlers |
+| `script.js` | App state, rendering, event handlers, auditor, backup/restore |
+| `logo.png` | Logo + favicon (referenced by `index.html` and the app) |
+| `_headers` | Netlify security headers (CSP, X-Frame-Options, etc.) |
 
 ## Files to ignore / never deploy
 
 - `.claude/` — local Claude Code config (launch.json, settings)
-- `MCW_Clinician_Matcher.jsx` — legacy React version, kept for reference only
 - `DEPLOYMENT.md` — this file (safe to commit; Netlify just ignores it)
 - Any `node_modules/`, `dist/`, or `.env` files if they ever appear
+
+> The old `MCW_Clinician_Matcher.jsx` legacy React duplicate was removed (it was a
+> stale, gitignored copy that drifted from production and held a second copy of the
+> password). There is now a single source of truth.
 
 ---
 
@@ -114,7 +119,11 @@ Edit `script.js`. The file is organized into sections with `// ----------` heade
 
 3. **Password is client-side.** `LOGIN_PASSWORD` in `data.js` is visible to anyone who views source. Do not treat this as real auth. If stronger access control is needed, use Netlify's paid visitor password feature or add server-side auth (a bigger architectural change — discuss with user first).
 
-4. **Data is per-browser.** The app uses `localStorage` (persistent per browser) for clinician edits and `sessionStorage` for login state. There is no shared backend. Do not add localStorage writes that assume cross-user sync.
+4. **Data is per-browser.** The app uses `localStorage` (persistent per browser) for clinician edits and `sessionStorage` for login state. There is no shared backend. Do not add localStorage writes that assume cross-user sync. Use the **⬇ Backup** button (sidebar footer) to export edits to a JSON file and **⬆ Restore** to import them on another browser until a shared backend exists.
+
+7. **Do NOT change `STORAGE_KEY`** (`data.js` line 1). Renaming it makes the app read a non-existent key and silently fall back to seed data, wiping every staff edit on every browser with no migration. Treat it as a permanent value.
+
+8. **Run the 🩺 Health check** (sidebar footer) after editing `data.js` — it flags duplicate ids, missing/invalid fields, and rate/group mismatches before they cause wrong filter results.
 
 5. **Preserve focus across re-renders.** `script.js` has a focus-preservation pattern in `render()` that restores the active input after re-render. If you add new text inputs, give them a unique `id` attribute so focus preservation works.
 

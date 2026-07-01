@@ -28,6 +28,8 @@ const state = {
   modalMods: null,
   modalNewMod: "",
   expandedSpecs: new Set(),
+  healthOpen: false,
+  healthResults: null,
 };
 
 const SPEC_LIMIT = 5;
@@ -78,6 +80,105 @@ function uniqueSorted(arr) {
   return [...new Set(arr)].filter(Boolean).sort();
 }
 
+// ---------- automated auditor ----------
+// Pure function: runs data + logic consistency checks over the current roster.
+// Returns [{ severity: "error"|"warn"|"info", who, message }]. Shared by the
+// in-app Health Check panel now; the same rules can later feed a CI/cron runner.
+const VALID_OFFICES = ["DTSP", "Tyrone", "Tampa", "Sarasota", "Virtual"];
+function runAudit(clinicians) {
+  const issues = [];
+  const validPriority = Object.keys(PRIORITY_ORDER);
+  const validStatus = Object.keys(STATUS_ORDER);
+  const seen = {};
+  (clinicians || []).forEach(c => {
+    const who = c.profile || c.name || c.id || "(unknown)";
+    if (seen[c.id]) issues.push({ severity: "error", who, message: `Duplicate id "${c.id}" — shared with ${seen[c.id]}. Their edits will collide.` });
+    else seen[c.id] = who;
+
+    ["name", "profile", "type", "schedule", "accepting", "priority"].forEach(f => {
+      if (!c[f]) issues.push({ severity: "error", who, message: `Missing required field "${f}".` });
+    });
+
+    if (c.priority && !validPriority.includes(c.priority)) issues.push({ severity: "error", who, message: `Priority "${c.priority}" is not one of the allowed values — it will sort incorrectly.` });
+    if (c.accepting && !validStatus.includes(c.accepting)) issues.push({ severity: "error", who, message: `Availability "${c.accepting}" is not an allowed value — it will sort incorrectly.` });
+    if (c.type && c.type !== "therapy" && c.type !== "psychiatry") issues.push({ severity: "error", who, message: `Type "${c.type}" is not "therapy" or "psychiatry".` });
+    (c.offices || []).forEach(o => { if (!VALID_OFFICES.includes(o)) issues.push({ severity: "warn", who, message: `Unknown office "${o}".` }); });
+
+    if (!Array.isArray(c.groups) || c.groups.length === 0) issues.push({ severity: "warn", who, message: `No client groups listed — this clinician may be hidden by session-type filters.` });
+
+    if (c.type === "therapy") {
+      if (!c.specialties || c.specialties.length === 0) issues.push({ severity: "warn", who, message: `Therapist has no specialties listed.` });
+      if (!c.modalities || c.modalities.length === 0) issues.push({ severity: "warn", who, message: `Therapist has no modalities listed.` });
+    }
+
+    const groups = c.groups || [];
+    if (c.couples && !groups.includes("Couples")) issues.push({ severity: "warn", who, message: `Has a couples rate but "Couples" is not in their groups — the Couples filter will hide them.` });
+    if (groups.includes("Couples") && !c.couples) issues.push({ severity: "info", who, message: `Lists the "Couples" group but has no couples rate.` });
+    if (c.family && !groups.includes("Families")) issues.push({ severity: "warn", who, message: `Has a family rate but "Families" is not in their groups — the Family filter will hide them.` });
+    if (groups.includes("Families") && !c.family) issues.push({ severity: "info", who, message: `Lists the "Families" group but has no family rate.` });
+    if (c.type === "therapy" && (c.indiv || c.indivDisplay) && !groups.includes("Individuals")) issues.push({ severity: "info", who, message: `Has an individual rate but "Individuals" is not in their groups.` });
+  });
+
+  // Runtime-only check: saved edits whose id no longer matches any clinician.
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      const ids = new Set((clinicians || []).map(c => c.id));
+      Object.keys(saved).forEach(k => {
+        if (!ids.has(k)) issues.push({ severity: "warn", who: "(saved data)", message: `Stored edits for "${k}" don't match any current clinician — orphaned and invisible.` });
+      });
+    }
+  } catch {}
+
+  return issues;
+}
+
+// ---------- backup / restore ----------
+// Exports the same field set persist() writes, so import round-trips exactly.
+function exportBackup() {
+  const map = {};
+  state.clinicians.forEach(c => {
+    map[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes, specialties: c.specialties, modalities: c.modalities };
+  });
+  const blob = new Blob([JSON.stringify(map, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `mcw-matcher-backup-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function importBackup() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.onchange = () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("bad shape");
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+        loadClinicians();
+        render();
+        alert("Backup imported — clinician edits have been restored on this browser.");
+      } catch {
+        alert("Could not import that file. It doesn't look like a valid MCW backup (expected a .json file exported from this app).");
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
 function getFiltered() {
   let res = state.clinicians.filter(c => c.type === state.typeFilter);
   if (state.search.trim()) {
@@ -88,12 +189,10 @@ function getFiltered() {
     res = res.filter(c => state.offices.some(o => c.offices.includes(o)));
   }
   if (state.sessionTypes.length) {
-    res = res.filter(c => state.sessionTypes.every(st => {
-      if (st === "Couples") return !!c.couples;
-      if (st === "Family") return !!c.family;
-      if (st === "Minors") return c.groups.includes("Minors");
-      return true;
-    }));
+    // Map the sidebar labels to the plural group names used in the data,
+    // and filter on `groups` as the single source of truth (not rate presence).
+    const GROUP_FOR = { Individual: "Individuals", Couples: "Couples", Family: "Families", Minors: "Minors" };
+    res = res.filter(c => state.sessionTypes.every(st => (c.groups || []).includes(GROUP_FOR[st] || st)));
   }
   if (state.selectedSpecs.length) {
     res = res.filter(c => state.selectedSpecs.some(s => c.specialties.includes(s)));
@@ -248,6 +347,11 @@ function renderSidebar() {
       </div>
       <div class="sidebar-foot">
         <button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>
+        <div class="foot-utils">
+          <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
+          <button data-action="export-backup" title="Download a backup of all edits">⬇ Backup</button>
+          <button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>
+        </div>
         <button class="signout-btn" data-action="signout">Sign out</button>
       </div>
     </div>
@@ -540,6 +644,47 @@ function renderAdminModal() {
   `;
 }
 
+function renderHealthModal() {
+  if (!state.healthOpen) return "";
+  const issues = state.healthResults || [];
+  const errors = issues.filter(i => i.severity === "error");
+  const warns = issues.filter(i => i.severity === "warn");
+  const infos = issues.filter(i => i.severity === "info");
+  const rank = { error: 0, warn: 1, info: 2 };
+  const sorted = [...issues].sort((a, b) => rank[a.severity] - rank[b.severity]);
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">🩺 Health check</span>
+            <p class="sub">Automated data &amp; logic checks on the current roster</p>
+          </div>
+          <button class="modal-close" data-action="health-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${issues.length === 0 ? `<p class="audit-ok">✓ All checks passed — no issues found.</p>` : `
+            <div class="audit-summary">
+              <span class="audit-count err">${errors.length} error${errors.length !== 1 ? "s" : ""}</span>
+              <span class="audit-count warn">${warns.length} warning${warns.length !== 1 ? "s" : ""}</span>
+              <span class="audit-count info">${infos.length} info</span>
+            </div>
+            ${sorted.map(i => `
+              <div class="audit-item audit-${i.severity}">
+                <span class="audit-who">${escapeHtml(i.who)}</span>
+                <span>${escapeHtml(i.message)}</span>
+              </div>
+            `).join("")}
+          `}
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="health-close">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 // ---------- render: top ----------
 function render() {
   // preserve focus
@@ -562,6 +707,7 @@ function render() {
       ${renderSpecsModal()}
       ${renderModsModal()}
       ${renderAdminModal()}
+      ${renderHealthModal()}
     `;
   }
 
@@ -751,6 +897,23 @@ function handleAction(action, el, ev) {
       return;
     }
 
+    // health check + backup
+    case "health-open":
+      state.healthResults = runAudit(state.clinicians);
+      state.healthOpen = true;
+      render();
+      return;
+    case "health-close":
+      state.healthOpen = false;
+      render();
+      return;
+    case "export-backup":
+      exportBackup();
+      return;
+    case "import-backup":
+      importBackup();
+      return;
+
     // admin panel
     case "admin-open": {
       state.adminEdits = {};
@@ -837,6 +1000,15 @@ document.addEventListener("submit", (ev) => {
   if (el.dataset.action === "login-submit") {
     handleAction("login-submit", el, ev);
   }
+});
+
+// Escape-to-close for any open modal
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  if (state.healthOpen) { state.healthOpen = false; render(); }
+  else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; render(); }
+  else if (state.specsModalId) { state.specsModalId = null; state.modalSpecs = null; state.modalNewSpec = ""; render(); }
+  else if (state.modsModalId) { state.modsModalId = null; state.modalMods = null; state.modalNewMod = ""; render(); }
 });
 
 // Enter-to-add for modal text inputs
