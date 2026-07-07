@@ -28,6 +28,7 @@ const state = {
   modSearch: "",
   adminOpen: false,
   adminEdits: null,
+  adminOriginal: null,
   editingCardId: null,
   cardEdit: null,
   specsModalId: null,
@@ -96,10 +97,22 @@ function persist(changedIds) {
         notes: c.notes,
         specialties: c.specialties,
         modalities: c.modalities,
-      }).eq("id", c.id)
+      }).eq("id", c.id).select("id")
     )).then(results => {
-      const failed = results.find(r => r && r.error);
-      if (failed) alert("Warning: this change could NOT be saved to the shared database (" + failed.error.message + "). Check your connection and try again.");
+      // .select("id") makes a remotely-deleted row detectable (0 rows updated)
+      const failures = results.filter(r => !r || r.error || !r.data || r.data.length === 0);
+      if (failures.length) {
+        const withMsg = failures.find(r => r && r.error);
+        alert(
+          failures.length + " change(s) could NOT be saved to the shared database" +
+          (withMsg ? " (" + withMsg.error.message + ")" : " (the clinician may have been removed)") +
+          ". Reloading the latest data."
+        );
+        loadClinicians().then(() => render());
+      }
+    }).catch(() => {
+      alert("Could not reach the database — your change was NOT saved. Reloading the latest data.");
+      loadClinicians().then(() => render());
     });
     return;
   }
@@ -120,6 +133,7 @@ function persist(changedIds) {
 
 // Live sync: when a colleague edits a clinician, update this screen too.
 let realtimeChannel = null;
+let realtimeDropped = false;
 function subscribeRealtime() {
   if (!sb || realtimeChannel) return;
   realtimeChannel = sb
@@ -135,7 +149,16 @@ function subscribeRealtime() {
       }
       render();
     })
-    .subscribe();
+    .subscribe((status) => {
+      // Events missed while the socket was down are not replayed —
+      // refetch the roster whenever the channel comes back.
+      if (status === "SUBSCRIBED" && realtimeDropped) {
+        realtimeDropped = false;
+        loadClinicians().then(() => render());
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        realtimeDropped = true;
+      }
+    });
 }
 
 function uniqueSorted(arr) {
@@ -250,7 +273,7 @@ function getFiltered() {
   let res = state.clinicians.filter(c => c.type === state.typeFilter);
   if (state.search.trim()) {
     const q = state.search.toLowerCase();
-    res = res.filter(c => c.name.toLowerCase().includes(q) || c.profile.toLowerCase().includes(q));
+    res = res.filter(c => (c.name || "").toLowerCase().includes(q) || (c.profile || "").toLowerCase().includes(q));
   }
   if (state.offices.length) {
     res = res.filter(c => state.offices.some(o => c.offices.includes(o)));
@@ -334,8 +357,7 @@ function renderLogin() {
             placeholder="Enter password…"
             value="${escapeHtml(state.loginPw)}"
             data-action="login-input"
-            autocomplete="${sb ? "current-password" : "off"}"
-            ${sb ? "" : "autofocus"}
+            ${sb ? `autocomplete="current-password"` : "autofocus"}
           />
           ${state.loginError ? `<p class="login-error">${sb ? "Sign-in failed. Check your email and password." : "Incorrect password. Please try again."}</p>` : ""}
           <button type="submit" class="login-btn" ${state.loginBusy ? "disabled" : ""}>${state.loginBusy ? "Signing in…" : "Sign in"}</button>
@@ -481,11 +503,11 @@ function renderCard(c) {
         <div class="section">
           <div class="section-head">
             <span class="section-title">Modalities</span>
-            <button class="section-edit" data-action="mods-modal-open" data-id="${c.id}">edit</button>
+            <button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">edit</button>
           </div>
           ${c.modalities.length
             ? `<p class="modalities-text">${escapeHtml(c.modalities.join(" · "))}</p>`
-            : `<button class="section-edit" data-action="mods-modal-open" data-id="${c.id}">+ Add modalities</button>`
+            : `<button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">+ Add modalities</button>`
           }
         </div>
 
@@ -493,12 +515,12 @@ function renderCard(c) {
           <div class="section">
             <div class="section-head">
               <span class="section-title">Specialties</span>
-              <button class="section-edit" data-action="specs-modal-open" data-id="${c.id}">edit</button>
+              <button class="section-edit" data-action="specs-modal-open" data-id="${escapeHtml(c.id)}">edit</button>
             </div>
             <div class="spec-tags">
               ${visible.map(s => `<span class="spec-tag">${escapeHtml(s)}</span>`).join("")}
-              ${!expanded && hidden > 0 ? `<button class="more-btn" data-action="specs-expand" data-id="${c.id}">+${hidden} more</button>` : ""}
-              ${expanded && hidden > 0 ? `<button class="less-btn" data-action="specs-collapse" data-id="${c.id}">show less</button>` : ""}
+              ${!expanded && hidden > 0 ? `<button class="more-btn" data-action="specs-expand" data-id="${escapeHtml(c.id)}">+${hidden} more</button>` : ""}
+              ${expanded && hidden > 0 ? `<button class="less-btn" data-action="specs-collapse" data-id="${escapeHtml(c.id)}">show less</button>` : ""}
             </div>
           </div>
         ` : ""}
@@ -528,16 +550,16 @@ function renderCard(c) {
           </div>
           <div class="edit-input-wrap">
             <label>Admin note</label>
-            <input id="card-edit-notes-${c.id}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="card-edit-notes" />
+            <input id="card-edit-notes-${escapeHtml(c.id)}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="card-edit-notes" />
           </div>
           <div class="edit-actions">
-            <button class="btn-save" data-action="card-edit-save" data-id="${c.id}">Save</button>
+            <button class="btn-save" data-action="card-edit-save" data-id="${escapeHtml(c.id)}">Save</button>
             <button class="btn-cancel" data-action="card-edit-cancel">Cancel</button>
           </div>
         </div>
       ` : `
         <div class="card-foot">
-          <button data-action="card-edit-start" data-id="${c.id}">Edit status &amp; priority</button>
+          <button data-action="card-edit-start" data-id="${escapeHtml(c.id)}">Edit status &amp; priority</button>
         </div>
       `}
     </div>
@@ -668,6 +690,12 @@ function renderAdminModal() {
   const therapy = state.clinicians.filter(c => c.type === "therapy");
   const psych = state.clinicians.filter(c => c.type === "psychiatry");
   const row = (c) => {
+    // A clinician can arrive via realtime while the modal is open — seed a
+    // buffer lazily so render doesn't crash and edits to them still work.
+    if (!state.adminEdits[c.id]) {
+      state.adminEdits[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes };
+      if (state.adminOriginal) state.adminOriginal[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes };
+    }
     const ed = state.adminEdits[c.id];
     return `
       <div class="admin-row">
@@ -678,7 +706,7 @@ function renderAdminModal() {
         <div class="edit-grid">
           <div>
             <label>Availability</label>
-            <select data-action="admin-accepting" data-id="${c.id}">
+            <select data-action="admin-accepting" data-id="${escapeHtml(c.id)}">
               <option ${ed.accepting === "Accepting" ? "selected" : ""}>Accepting</option>
               <option ${ed.accepting === "Needs Clients" ? "selected" : ""}>Needs Clients</option>
               <option ${ed.accepting === "Not Accepting" ? "selected" : ""}>Not Accepting</option>
@@ -686,7 +714,7 @@ function renderAdminModal() {
           </div>
           <div>
             <label>Priority</label>
-            <select data-action="admin-priority" data-id="${c.id}">
+            <select data-action="admin-priority" data-id="${escapeHtml(c.id)}">
               <option ${ed.priority === "High Priority" ? "selected" : ""}>High Priority</option>
               <option ${ed.priority === "Medium Priority" ? "selected" : ""}>Medium Priority</option>
               <option ${ed.priority === "Low Priority" ? "selected" : ""}>Low Priority</option>
@@ -695,7 +723,7 @@ function renderAdminModal() {
         </div>
         <div class="edit-input-wrap">
           <label>Admin notes</label>
-          <input id="admin-notes-${c.id}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="admin-notes" data-id="${c.id}" />
+          <input id="admin-notes-${escapeHtml(c.id)}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="admin-notes" data-id="${escapeHtml(c.id)}" />
         </div>
       </div>
     `;
@@ -844,21 +872,23 @@ function handleAction(action, el, ev) {
         state.loginBusy = true;
         state.loginError = false;
         render();
-        sb.auth.signInWithPassword({ email, password }).then(async ({ error }) => {
+        // On success, onAuthStateChange (boot) is the single place that loads
+        // data and subscribes — it fires before this promise resolves, so doing
+        // it here too would double-load.
+        sb.auth.signInWithPassword({ email, password }).then(({ error }) => {
           state.loginBusy = false;
           if (error) {
             state.loginError = true;
             state.loginPw = "";
-            render();
           } else {
-            state.authed = true;
             state.loginPw = "";
-            state.loading = true;
-            render();
-            await loadClinicians();
-            render();
-            subscribeRealtime();
+            state.loginEmail = "";
           }
+          render();
+        }).catch(() => {
+          state.loginBusy = false;
+          state.loginError = true;
+          render();
         });
         return;
       }
@@ -1044,8 +1074,10 @@ function handleAction(action, el, ev) {
     // admin panel
     case "admin-open": {
       state.adminEdits = {};
+      state.adminOriginal = {};
       state.clinicians.forEach(c => {
         state.adminEdits[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes };
+        state.adminOriginal[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes };
       });
       state.adminOpen = true;
       render();
@@ -1054,6 +1086,7 @@ function handleAction(action, el, ev) {
     case "admin-close":
       state.adminOpen = false;
       state.adminEdits = null;
+      state.adminOriginal = null;
       render();
       return;
     case "admin-accepting":
@@ -1066,13 +1099,20 @@ function handleAction(action, el, ev) {
       state.adminEdits[el.dataset.id].notes = el.value;
       return;
     case "admin-save": {
-      state.clinicians = state.clinicians.map(c => {
-        const ed = state.adminEdits[c.id];
-        return ed ? { ...c, ...ed } : c;
+      // Only apply/save rows the admin actually changed — writing untouched
+      // rows would overwrite colleagues' concurrent edits with a stale snapshot.
+      const changed = Object.keys(state.adminEdits).filter(id => {
+        const ed = state.adminEdits[id];
+        const orig = (state.adminOriginal && state.adminOriginal[id]) || {};
+        return ed.accepting !== orig.accepting || ed.priority !== orig.priority || ed.notes !== orig.notes;
       });
-      persist(Object.keys(state.adminEdits));
+      state.clinicians = state.clinicians.map(c => {
+        return changed.includes(c.id) ? { ...c, ...state.adminEdits[c.id] } : c;
+      });
+      if (changed.length) persist(changed);
       state.adminOpen = false;
       state.adminEdits = null;
+      state.adminOriginal = null;
       render();
       return;
     }
@@ -1107,7 +1147,7 @@ document.addEventListener("input", (ev) => {
   const el = findActionEl(ev.target);
   if (!el) return;
   if (el.tagName !== "INPUT") return;
-  if (el.type !== "text" && el.type !== "password") return;
+  if (el.type !== "text" && el.type !== "password" && el.type !== "email") return;
   handleAction(el.dataset.action, el, ev);
 });
 
@@ -1133,7 +1173,7 @@ document.addEventListener("submit", (ev) => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
   if (state.healthOpen) { state.healthOpen = false; render(); }
-  else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; render(); }
+  else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; state.adminOriginal = null; render(); }
   else if (state.specsModalId) { state.specsModalId = null; state.modalSpecs = null; state.modalNewSpec = ""; render(); }
   else if (state.modsModalId) { state.modsModalId = null; state.modalMods = null; state.modalNewMod = ""; render(); }
 });
@@ -1156,20 +1196,25 @@ document.addEventListener("keydown", (ev) => {
 async function boot() {
   if (sb) {
     // Shared mode: session comes from Supabase Auth, not sessionStorage.
+    state.authed = false;
+    state.loading = true;
+    render(); // show something immediately instead of a blank page
     try {
       const { data } = await sb.auth.getSession();
       state.authed = !!(data && data.session);
     } catch {
       state.authed = false;
     }
+    // Single place that reacts to sign-in/sign-out (fires during
+    // signInWithPassword, before its promise resolves).
     sb.auth.onAuthStateChange((_event, session) => {
       const nowAuthed = !!session;
-      if (nowAuthed === state.authed) return; // login handler already dealt with it
+      if (nowAuthed === state.authed) return;
       state.authed = nowAuthed;
       if (nowAuthed) {
         state.loading = true;
         render();
-        loadClinicians().then(() => { render(); subscribeRealtime(); });
+        loadClinicians().then(() => { state.loading = false; render(); subscribeRealtime(); });
       } else {
         render(); // session expired or signed out elsewhere
       }

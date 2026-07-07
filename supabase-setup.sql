@@ -8,7 +8,7 @@
 create table if not exists public.clinicians (
   id text primary key,
   name text not null,
-  profile text,
+  profile text not null default '',
   type text not null default 'therapy',
   offices jsonb not null default '[]'::jsonb,
   virtual boolean not null default false,
