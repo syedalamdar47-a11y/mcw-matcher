@@ -2,10 +2,19 @@
 // MCW Client Matcher — vanilla JS app
 // ============================================================
 
+// Supabase client — null when data.js has no SUPABASE_URL, in which case the
+// app runs in legacy local mode (per-browser localStorage + shared password).
+const sb = (typeof SUPABASE_URL !== "undefined" && SUPABASE_URL && typeof supabase !== "undefined")
+  ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
 const state = {
   authed: sessionStorage.getItem("mcw_auth") === "1",
   loginPw: "",
+  loginEmail: "",
+  loginBusy: false,
   loginError: false,
+  loadError: "",
   clinicians: [],
   loading: true,
   search: "",
@@ -45,7 +54,20 @@ function escapeHtml(s) {
     .replace(/'/g, "&#039;");
 }
 
-function loadClinicians() {
+async function loadClinicians() {
+  if (sb) {
+    state.loadError = "";
+    try {
+      const { data, error } = await sb.from("clinicians").select("*").order("name");
+      if (error) throw error;
+      state.clinicians = (data || []).map(r => ({ ...r }));
+    } catch (e) {
+      state.loadError = (e && e.message) || "Could not reach the database.";
+      state.clinicians = [];
+    }
+    state.loading = false;
+    return;
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -60,7 +82,27 @@ function loadClinicians() {
   state.loading = false;
 }
 
-function persist() {
+// Saves the editable fields. In shared mode, writes ONLY the changed rows to the
+// database (pass the changed id(s)); writing unchanged rows would clobber a
+// colleague's concurrent edits with stale values.
+function persist(changedIds) {
+  if (sb) {
+    const ids = changedIds || state.clinicians.map(c => c.id);
+    const rows = state.clinicians.filter(c => ids.includes(c.id));
+    Promise.all(rows.map(c =>
+      sb.from("clinicians").update({
+        accepting: c.accepting,
+        priority: c.priority,
+        notes: c.notes,
+        specialties: c.specialties,
+        modalities: c.modalities,
+      }).eq("id", c.id)
+    )).then(results => {
+      const failed = results.find(r => r && r.error);
+      if (failed) alert("Warning: this change could NOT be saved to the shared database (" + failed.error.message + "). Check your connection and try again.");
+    });
+    return;
+  }
   try {
     const map = {};
     state.clinicians.forEach(c => {
@@ -74,6 +116,26 @@ function persist() {
     });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
   } catch {}
+}
+
+// Live sync: when a colleague edits a clinician, update this screen too.
+let realtimeChannel = null;
+function subscribeRealtime() {
+  if (!sb || realtimeChannel) return;
+  realtimeChannel = sb
+    .channel("clinicians-live")
+    .on("postgres_changes", { event: "*", schema: "public", table: "clinicians" }, (payload) => {
+      if (payload.eventType === "DELETE") {
+        const oldId = payload.old && payload.old.id;
+        if (oldId) state.clinicians = state.clinicians.filter(c => c.id !== oldId);
+      } else if (payload.new && payload.new.id) {
+        const i = state.clinicians.findIndex(c => c.id === payload.new.id);
+        if (i >= 0) state.clinicians[i] = { ...state.clinicians[i], ...payload.new };
+        else state.clinicians.push({ ...payload.new });
+      }
+      render();
+    })
+    .subscribe();
 }
 
 function uniqueSorted(arr) {
@@ -119,7 +181,8 @@ function runAudit(clinicians) {
     if (c.type === "therapy" && (c.indiv || c.indivDisplay) && !groups.includes("Individuals")) issues.push({ severity: "info", who, message: `Has an individual rate but "Individuals" is not in their groups.` });
   });
 
-  // Runtime-only check: saved edits whose id no longer matches any clinician.
+  // Runtime-only check (local mode): saved edits whose id no longer matches any clinician.
+  if (sb) return issues;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -155,6 +218,10 @@ function exportBackup() {
 }
 
 function importBackup() {
+  if (sb) {
+    alert("Restore from file isn't needed anymore — clinician data now lives in the shared database, so every browser sees the same live data.");
+    return;
+  }
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "application/json,.json";
@@ -246,6 +313,19 @@ function renderLogin() {
           <p class="login-sub">Front office scheduling</p>
         </div>
         <form data-action="login-submit">
+          ${sb ? `
+          <label class="login-label" for="login-email">Email</label>
+          <input
+            id="login-email"
+            type="email"
+            class="login-input ${state.loginError ? "error" : ""}"
+            placeholder="you@mcnultycounseling.com"
+            value="${escapeHtml(state.loginEmail)}"
+            data-action="login-email-input"
+            autocomplete="username"
+            autofocus
+          />
+          ` : ""}
           <label class="login-label" for="login-pw">Password</label>
           <input
             id="login-pw"
@@ -254,10 +334,11 @@ function renderLogin() {
             placeholder="Enter password…"
             value="${escapeHtml(state.loginPw)}"
             data-action="login-input"
-            autofocus
+            autocomplete="${sb ? "current-password" : "off"}"
+            ${sb ? "" : "autofocus"}
           />
-          ${state.loginError ? `<p class="login-error">Incorrect password. Please try again.</p>` : ""}
-          <button type="submit" class="login-btn">Sign in</button>
+          ${state.loginError ? `<p class="login-error">${sb ? "Sign-in failed. Check your email and password." : "Incorrect password. Please try again."}</p>` : ""}
+          <button type="submit" class="login-btn" ${state.loginBusy ? "disabled" : ""}>${state.loginBusy ? "Signing in…" : "Sign in"}</button>
         </form>
       </div>
     </div>
@@ -698,6 +779,13 @@ function render() {
     root.innerHTML = renderLogin();
   } else if (state.loading) {
     root.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#94a3b8;font-size:14px;">Loading…</div>`;
+  } else if (state.loadError) {
+    root.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;height:100vh;color:#991b1b;font-size:14px;padding:20px;text-align:center;">
+        <div>Could not load clinicians: ${escapeHtml(state.loadError)}</div>
+        <button class="login-btn" style="max-width:200px;" data-action="retry-load">Retry</button>
+        <button class="btn-cancel" style="max-width:200px;" data-action="signout">Sign out</button>
+      </div>`;
   } else {
     root.innerHTML = `
       <div class="app-shell">
@@ -742,8 +830,38 @@ function handleAction(action, el, ev) {
       state.loginPw = el.value;
       state.loginError = false;
       return;
+    case "login-email-input":
+      state.loginEmail = el.value;
+      state.loginError = false;
+      return;
     case "login-submit":
       ev.preventDefault();
+      if (sb) {
+        if (state.loginBusy) return;
+        const email = state.loginEmail.trim();
+        const password = state.loginPw;
+        if (!email || !password) { state.loginError = true; render(); return; }
+        state.loginBusy = true;
+        state.loginError = false;
+        render();
+        sb.auth.signInWithPassword({ email, password }).then(async ({ error }) => {
+          state.loginBusy = false;
+          if (error) {
+            state.loginError = true;
+            state.loginPw = "";
+            render();
+          } else {
+            state.authed = true;
+            state.loginPw = "";
+            state.loading = true;
+            render();
+            await loadClinicians();
+            render();
+            subscribeRealtime();
+          }
+        });
+        return;
+      }
       if (state.loginPw === LOGIN_PASSWORD) {
         sessionStorage.setItem("mcw_auth", "1");
         state.authed = true;
@@ -757,9 +875,18 @@ function handleAction(action, el, ev) {
       render();
       return;
     case "signout":
+      if (sb) {
+        sb.auth.signOut();
+        state.clinicians = [];
+      }
       sessionStorage.removeItem("mcw_auth");
       state.authed = false;
       render();
+      return;
+    case "retry-load":
+      state.loading = true;
+      render();
+      loadClinicians().then(() => render());
       return;
     case "search-input":
       state.search = el.value; render(); return;
@@ -807,7 +934,7 @@ function handleAction(action, el, ev) {
     case "card-edit-save": {
       const id = el.dataset.id;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, ...state.cardEdit } : c);
-      persist();
+      persist([id]);
       state.editingCardId = null;
       state.cardEdit = null;
       render();
@@ -851,7 +978,7 @@ function handleAction(action, el, ev) {
     case "modal-spec-save": {
       const id = state.specsModalId;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, specialties: state.modalSpecs.slice() } : c);
-      persist();
+      persist([id]);
       state.specsModalId = null;
       state.modalSpecs = null;
       render();
@@ -890,7 +1017,7 @@ function handleAction(action, el, ev) {
     case "modal-mod-save": {
       const id = state.modsModalId;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, modalities: state.modalMods.slice() } : c);
-      persist();
+      persist([id]);
       state.modsModalId = null;
       state.modalMods = null;
       render();
@@ -943,7 +1070,7 @@ function handleAction(action, el, ev) {
         const ed = state.adminEdits[c.id];
         return ed ? { ...c, ...ed } : c;
       });
-      persist();
+      persist(Object.keys(state.adminEdits));
       state.adminOpen = false;
       state.adminEdits = null;
       render();
@@ -967,7 +1094,7 @@ document.addEventListener("click", (ev) => {
   if (!el) return;
   const action = el.dataset.action;
   // skip click handling for inputs that have their own handlers
-  if (el.tagName === "INPUT" && (el.type === "text" || el.type === "password")) return;
+  if (el.tagName === "INPUT" && (el.type === "text" || el.type === "password" || el.type === "email")) return;
   if (el.tagName === "SELECT") return;
   // checkboxes are handled by change
   if (el.tagName === "INPUT" && el.type === "checkbox") return;
@@ -1026,5 +1153,36 @@ document.addEventListener("keydown", (ev) => {
 });
 
 // ---------- init ----------
-loadClinicians();
-render();
+async function boot() {
+  if (sb) {
+    // Shared mode: session comes from Supabase Auth, not sessionStorage.
+    try {
+      const { data } = await sb.auth.getSession();
+      state.authed = !!(data && data.session);
+    } catch {
+      state.authed = false;
+    }
+    sb.auth.onAuthStateChange((_event, session) => {
+      const nowAuthed = !!session;
+      if (nowAuthed === state.authed) return; // login handler already dealt with it
+      state.authed = nowAuthed;
+      if (nowAuthed) {
+        state.loading = true;
+        render();
+        loadClinicians().then(() => { render(); subscribeRealtime(); });
+      } else {
+        render(); // session expired or signed out elsewhere
+      }
+    });
+    if (state.authed) {
+      await loadClinicians();
+      subscribeRealtime();
+    }
+    state.loading = false;
+    render();
+    return;
+  }
+  loadClinicians();
+  render();
+}
+boot();
