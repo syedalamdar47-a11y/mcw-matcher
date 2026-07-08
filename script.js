@@ -44,6 +44,9 @@ const state = {
   editorDraft: null,   // buffered field values for the editor form
   editorErrors: null,  // validation / save errors shown in the editor
   editorBusy: false,
+  sheetSyncBusy: false,
+  sheetSyncReport: null, // result of the last Google-Sheet sync
+  sheetReportOpen: false,
 };
 
 const SPEC_LIMIT = 5;
@@ -252,6 +255,119 @@ function closeEditor() {
   state.editorDraft = null;
   state.editorErrors = null;
   state.editorBusy = false;
+}
+
+// ---------- Google Sheet -> priority sync ----------
+// Reads the published-CSV sheet, matches rows to clinicians BY ID (never by
+// name — the roster has duplicate first names), maps sheet values to the exact
+// enum strings, and writes only the rows that actually changed to the shared
+// database. Unrecognized values are reported, never guessed.
+const PRIORITY_ALIASES = {
+  "high": "High Priority", "high priority": "High Priority", "h": "High Priority", "1": "High Priority",
+  "medium": "Medium Priority", "medium priority": "Medium Priority", "med": "Medium Priority", "m": "Medium Priority", "2": "Medium Priority",
+  "low": "Low Priority", "low priority": "Low Priority", "l": "Low Priority", "3": "Low Priority",
+};
+const ACCEPTING_ALIASES = {
+  "accepting": "Accepting", "yes": "Accepting", "y": "Accepting", "open": "Accepting",
+  "needs clients": "Needs Clients", "needs": "Needs Clients", "needs clients urgently": "Needs Clients",
+  "not accepting": "Not Accepting", "no": "Not Accepting", "n": "Not Accepting", "closed": "Not Accepting", "full": "Not Accepting",
+};
+
+// Minimal RFC-4180 CSV parser: quoted fields, embedded commas/quotes, CRLF.
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      row.push(field); field = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      rows.push(row); row = [];
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim() !== ""));
+}
+
+async function syncFromSheet(openReport) {
+  if (!sb || !SHEET_SYNC.csvUrl || state.sheetSyncBusy) return;
+  state.sheetSyncBusy = true;
+  render();
+  const report = { at: new Date(), updated: [], unchanged: 0, unmatched: [], invalid: [], missingFromSheet: [], error: null };
+  try {
+    const resp = await fetch(SHEET_SYNC.csvUrl, { cache: "no-store" });
+    if (!resp.ok) throw new Error("Sheet returned HTTP " + resp.status);
+    const rows = parseCsv(await resp.text());
+    if (rows.length < 2) throw new Error("The sheet appears to be empty (no data rows).");
+
+    const headers = rows[0].map(h => h.trim().toLowerCase());
+    const idIdx = headers.indexOf(SHEET_SYNC.idColumn.toLowerCase());
+    const prIdx = headers.indexOf(SHEET_SYNC.priorityColumn.toLowerCase());
+    const acIdx = SHEET_SYNC.acceptingColumn ? headers.indexOf(SHEET_SYNC.acceptingColumn.toLowerCase()) : -1;
+    if (idIdx < 0) throw new Error(`The sheet has no "${SHEET_SYNC.idColumn}" column — add one with the clinician ids.`);
+    if (prIdx < 0) throw new Error(`The sheet has no "${SHEET_SYNC.priorityColumn}" column.`);
+
+    const seenIds = new Set();
+    const writes = [];
+    for (let r = 1; r < rows.length; r++) {
+      const cells = rows[r];
+      const rawId = (cells[idIdx] || "").trim();
+      if (!rawId) continue;
+      const c = state.clinicians.find(x => x.id === rawId);
+      if (!c) { report.unmatched.push(`Row ${r + 1}: id "${rawId}" doesn't match any clinician`); continue; }
+      seenIds.add(rawId);
+
+      const fields = {};
+      const rawPr = (cells[prIdx] || "").trim();
+      if (rawPr) {
+        const mapped = PRIORITY_ALIASES[rawPr.toLowerCase()];
+        if (!mapped) report.invalid.push(`${c.name}: priority "${rawPr}" not recognized (use High / Medium / Low)`);
+        else if (c.priority !== mapped) fields.priority = mapped;
+      }
+      if (acIdx >= 0) {
+        const rawAc = (cells[acIdx] || "").trim();
+        if (rawAc) {
+          const mapped = ACCEPTING_ALIASES[rawAc.toLowerCase()];
+          if (!mapped) report.invalid.push(`${c.name}: availability "${rawAc}" not recognized (use Accepting / Needs Clients / Not Accepting)`);
+          else if (c.accepting !== mapped) fields.accepting = mapped;
+        }
+      }
+      if (Object.keys(fields).length) writes.push({ id: c.id, name: c.name, fields });
+      else report.unchanged++;
+    }
+
+    state.clinicians.forEach(c => {
+      if (c.active !== false && !seenIds.has(c.id)) report.missingFromSheet.push(c.name);
+    });
+
+    for (const w of writes) {
+      const { data, error } = await sb.from("clinicians").update(w.fields).eq("id", w.id).select("id");
+      if (error || !data || !data.length) {
+        report.invalid.push(`${w.name}: could not save (${error ? error.message : "row missing"})`);
+      } else {
+        state.clinicians = state.clinicians.map(c => c.id === w.id ? { ...c, ...w.fields } : c);
+        report.updated.push(`${w.name}: ${Object.entries(w.fields).map(([k, v]) => k + " → " + v).join(", ")}`);
+      }
+    }
+  } catch (e) {
+    report.error = (e && e.message) || "Could not fetch the sheet.";
+  }
+  state.sheetSyncBusy = false;
+  state.sheetSyncReport = report;
+  // Auto-sync stays quiet on success; problems always surface.
+  if (openReport || report.error || report.unmatched.length || report.invalid.length) state.sheetReportOpen = true;
+  render();
 }
 
 // ---------- automated auditor ----------
@@ -541,6 +657,7 @@ function renderSidebar() {
       </div>
       <div class="sidebar-foot">
         ${sb ? `<button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>` : ""}
+        ${sb && SHEET_SYNC.csvUrl ? `<button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>` : ""}
         <button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>
         <div class="foot-utils">
           <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
@@ -953,6 +1070,46 @@ function renderEditorModal() {
   `;
 }
 
+function renderSheetReportModal() {
+  if (!state.sheetReportOpen || !state.sheetSyncReport) return "";
+  const r = state.sheetSyncReport;
+  const section = (title, cls, items) => items.length ? `
+    <p class="admin-section-label spaced">${title}</p>
+    ${items.map(m => `<div class="audit-item audit-${cls}"><span>${escapeHtml(m)}</span></div>`).join("")}
+  ` : "";
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">⟳ Sheet sync report</span>
+            <p class="sub">${escapeHtml(r.at.toLocaleString())}</p>
+          </div>
+          <button class="modal-close" data-action="sheet-report-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${r.error ? `<div class="audit-item audit-error"><span>${escapeHtml(r.error)}</span></div>` : `
+            ${r.updated.length === 0 && !r.unmatched.length && !r.invalid.length
+              ? `<p class="audit-ok">✓ Everything already matches the sheet (${r.unchanged} checked).</p>`
+              : `
+                ${section("Updated from sheet", "info", r.updated)}
+                ${section("Values the sheet got wrong", "error", r.invalid)}
+                ${section("Rows that matched no clinician", "warn", r.unmatched)}
+              `}
+            ${r.missingFromSheet.length ? `
+              <p class="admin-section-label spaced">In the app but not in the sheet (left unchanged)</p>
+              <div class="audit-item audit-info"><span>${escapeHtml(r.missingFromSheet.join(", "))}</span></div>
+            ` : ""}
+          `}
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="sheet-report-close">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderHealthModal() {
   if (!state.healthOpen) return "";
   const issues = state.healthResults || [];
@@ -1025,6 +1182,7 @@ function render() {
       ${renderAdminModal()}
       ${renderHealthModal()}
       ${renderEditorModal()}
+      ${renderSheetReportModal()}
     `;
   }
 
@@ -1374,6 +1532,15 @@ function handleAction(action, el, ev) {
       return;
     }
 
+    // Google Sheet sync
+    case "sheet-sync":
+      syncFromSheet(true);
+      return;
+    case "sheet-report-close":
+      state.sheetReportOpen = false;
+      render();
+      return;
+
     // health check + backup
     case "health-open":
       state.healthResults = runAudit(state.clinicians);
@@ -1493,6 +1660,7 @@ document.addEventListener("submit", (ev) => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
   if (state.editorId) { closeEditor(); render(); }
+  else if (state.sheetReportOpen) { state.sheetReportOpen = false; render(); }
   else if (state.healthOpen) { state.healthOpen = false; render(); }
   else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; state.adminOriginal = null; render(); }
   else if (state.specsModalId) { state.specsModalId = null; state.modalSpecs = null; state.modalNewSpec = ""; render(); }
@@ -1535,7 +1703,12 @@ async function boot() {
       if (nowAuthed) {
         state.loading = true;
         render();
-        loadClinicians().then(() => { state.loading = false; render(); subscribeRealtime(); });
+        loadClinicians().then(() => {
+          state.loading = false;
+          render();
+          subscribeRealtime();
+          if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
+        });
       } else {
         render(); // session expired or signed out elsewhere
       }
@@ -1543,6 +1716,7 @@ async function boot() {
     if (state.authed) {
       await loadClinicians();
       subscribeRealtime();
+      if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
     }
     state.loading = false;
     render();

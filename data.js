@@ -8,6 +8,19 @@ const LOGIN_PASSWORD = "mcw2025"; // used ONLY in local mode (when SUPABASE_URL 
 const SUPABASE_URL = "https://gazzhqtqnmpyjejwujei.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_3yqQgb_zZJ_LaCdbMxHlbg_uaJ0OwzC";
 
+// --- Google Sheet -> priority sync ---
+// Publish the sheet (File > Share > Publish to web > CSV), paste the URL here.
+// The sheet needs an "id" column (stable clinician ids) and a "priority" column.
+// Optional "accepting" column drives availability too. Leave csvUrl empty to
+// disable the feature. Column names are matched case-insensitively by header.
+const SHEET_SYNC = {
+  csvUrl: "",
+  idColumn: "id",
+  priorityColumn: "priority",
+  acceptingColumn: "accepting", // set to "" if the sheet shouldn't drive availability
+  autoSyncOnLogin: true,
+};
+
 const SEED_DATA = [
   { id:"kiesa", name:"Kiesa DeSimone", profile:"Kiesa DeSimone, LMHC", type:"therapy", offices:["Tyrone"], virtual:false, indiv:185, couples:null, family:null, schedule:"Mon-Fri", accepting:"Needs Clients", priority:"High Priority", groups:["Minors","Individuals"], modalities:["CBT","EMDR","DBT","ACT","EFT","Mindfulness-Based Therapy","Walk and Talk Therapy","Somatic"], specialties:["Anxiety","Depression","Grief","Trauma","Bipolar","Body Image","Self-esteem","ASD","Abuse/DV","LGBTQIA+","Divorce/Separation","Self-harm","Suicidal Ideation","Womens Issues","Mens Issues","Substance Abuse/Addiction"], notes:"Prefers clients with trauma history. Strong with complex trauma." },
   { id:"sarah", name:"Sarah Drew", profile:"Sarah Drew, LMHC", type:"therapy", offices:["DTSP"], virtual:false, indiv:185, couples:null, family:null, schedule:"Mon-Fri", accepting:"Needs Clients", priority:"Medium Priority", groups:["Minors","Individuals"], modalities:["CBT","DBT","Mindfulness-Based Therapy","Person Centered","Gestalt","Narrative","REBT"], specialties:["Anxiety","Depression","Self-esteem","Womens Issues","Trauma","LGBTQIA+","Grief","Bipolar"], notes:"" },

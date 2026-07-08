@@ -184,3 +184,27 @@ Edits save to the shared database and appear on colleagues' screens live.
   sign-up should stay OFF (Authentication → Sign In / Providers).
 - **SEED_DATA in `data.js` is now only a fallback** for local mode. The database
   is the source of truth for clinician data in shared mode.
+
+---
+
+## Google Sheet -> priority sync
+
+Configured via `SHEET_SYNC` at the top of `data.js`. When `csvUrl` is set to a
+published-to-web CSV URL, the app syncs clinician **priority** (and optionally
+**accepting**) from the sheet — automatically at sign-in and via the sidebar's
+"⟳ Sync from Sheet" button, which also shows a report of what changed.
+
+Rules:
+- The sheet MUST have an `id` column with the stable clinician ids
+  (see `sheet-template.csv` for the current list). Matching is by id only —
+  never by name (the roster has duplicate first names).
+- Priority values accepted: High/Medium/Low (any casing, "High Priority",
+  or 1/2/3). Accepting values: Accepting/yes/open, Needs Clients,
+  Not Accepting/no/closed/full. Anything else is REPORTED and skipped —
+  never guessed.
+- The sheet only ever changes priority/accepting. Other fields are untouched.
+- Only rows that actually differ are written, and changes propagate live to
+  all staff screens.
+- The published-CSV URL is public to anyone who has it; it exposes whatever
+  columns the published tab contains. Keep that tab minimal (id, name,
+  priority, accepting).
