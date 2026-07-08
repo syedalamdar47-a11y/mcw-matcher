@@ -40,6 +40,10 @@ const state = {
   expandedSpecs: new Set(),
   healthOpen: false,
   healthResults: null,
+  editorId: null,      // clinician id being edited, or "__new__"
+  editorDraft: null,   // buffered field values for the editor form
+  editorErrors: null,  // validation / save errors shown in the editor
+  editorBusy: false,
 };
 
 const SPEC_LIMIT = 5;
@@ -165,6 +169,91 @@ function uniqueSorted(arr) {
   return [...new Set(arr)].filter(Boolean).sort();
 }
 
+// ---------- clinician editor (add / edit details / deactivate / delete) ----------
+// Requires shared mode: the database is the source of truth for the roster.
+const VALID_GROUPS = ["Individuals", "Couples", "Families", "Minors"];
+
+// Stable, unique, immutable id from a name: "Jane O'Brien" -> "jane_o_brien"
+// (suffixesed if taken). Ids never change after creation — the Google-Sheet
+// sync (goal 3) and saved edits both key on them.
+function generateId(name) {
+  const base = String(name).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "clinician";
+  const taken = new Set(state.clinicians.map(c => c.id));
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(base + "_" + n)) n++;
+  return base + "_" + n;
+}
+
+function draftFromClinician(c) {
+  return {
+    name: c.name || "",
+    profile: c.profile || "",
+    type: c.type || "therapy",
+    offices: (c.offices || []).slice(),
+    virtual: !!c.virtual,
+    indiv: c.indiv == null ? "" : String(c.indiv),
+    indivDisplay: c.indivDisplay || "",
+    couples: c.couples == null ? "" : String(c.couples),
+    family: c.family == null ? "" : String(c.family),
+    schedule: c.schedule || "",
+    groups: (c.groups || []).slice(),
+  };
+}
+
+function blankDraft() {
+  return { name: "", profile: "", type: "therapy", offices: [], virtual: false, indiv: "", indivDisplay: "", couples: "", family: "", schedule: "", groups: [] };
+}
+
+// Parses a rate input: "" -> null, otherwise must be a positive number.
+function parseRate(v) {
+  const s = String(v).trim().replace(/^\$/, "");
+  if (!s) return { ok: true, value: null };
+  const n = Number(s);
+  if (!isFinite(n) || n <= 0) return { ok: false };
+  return { ok: true, value: n };
+}
+
+function validateDraft(d) {
+  const errors = [];
+  if (!d.name.trim()) errors.push("Name is required.");
+  if (!d.profile.trim()) errors.push("Profile is required (e.g. \"Jane Doe, LMHC\").");
+  if (!d.schedule.trim()) errors.push("Schedule is required (e.g. \"Mon-Fri\").");
+  if (d.type !== "therapy" && d.type !== "psychiatry") errors.push("Type must be therapy or psychiatry.");
+  if (!d.offices.length) errors.push("Pick at least one office (Virtual counts).");
+  if (!d.groups.length) errors.push("Pick at least one session group — clinicians with no groups are hidden by the session-type filters.");
+  if (!parseRate(d.indiv).ok) errors.push("Individual rate must be a number (or leave it blank and use the rate text instead).");
+  if (!parseRate(d.couples).ok) errors.push("Couples rate must be a number or blank.");
+  if (!parseRate(d.family).ok) errors.push("Family rate must be a number or blank.");
+  return errors;
+}
+
+// The editor owns ONLY the identity/detail fields. Status, priority, notes,
+// specialties, and modalities keep their own editors so concurrent edits by
+// different staff don't overwrite each other.
+function draftToFields(d) {
+  return {
+    name: d.name.trim(),
+    profile: d.profile.trim(),
+    type: d.type,
+    offices: d.offices,
+    virtual: d.virtual,
+    indiv: parseRate(d.indiv).value,
+    indivDisplay: d.indivDisplay.trim() || null,
+    couples: parseRate(d.couples).value,
+    family: parseRate(d.family).value,
+    schedule: d.schedule.trim(),
+    groups: d.groups,
+  };
+}
+
+function closeEditor() {
+  state.editorId = null;
+  state.editorDraft = null;
+  state.editorErrors = null;
+  state.editorBusy = false;
+}
+
 // ---------- automated auditor ----------
 // Pure function: runs data + logic consistency checks over the current roster.
 // Returns [{ severity: "error"|"warn"|"info", who, message }]. Shared by the
@@ -176,6 +265,7 @@ function runAudit(clinicians) {
   const validStatus = Object.keys(STATUS_ORDER);
   const seen = {};
   (clinicians || []).forEach(c => {
+    if (c.active === false) return; // deactivated clinicians are exempt from checks
     const who = c.profile || c.name || c.id || "(unknown)";
     if (seen[c.id]) issues.push({ severity: "error", who, message: `Duplicate id "${c.id}" — shared with ${seen[c.id]}. Their edits will collide.` });
     else seen[c.id] = who;
@@ -270,7 +360,8 @@ function importBackup() {
 }
 
 function getFiltered() {
-  let res = state.clinicians.filter(c => c.type === state.typeFilter);
+  // active === false means deactivated (soft-deleted); reactivate from the admin panel
+  let res = state.clinicians.filter(c => c.type === state.typeFilter && c.active !== false);
   if (state.search.trim()) {
     const q = state.search.toLowerCase();
     res = res.filter(c => (c.name || "").toLowerCase().includes(q) || (c.profile || "").toLowerCase().includes(q));
@@ -449,6 +540,7 @@ function renderSidebar() {
         ${hasFilters ? `<button class="clear-all-btn" data-action="clear-all">Clear all filters</button>` : ""}
       </div>
       <div class="sidebar-foot">
+        ${sb ? `<button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>` : ""}
         <button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>
         <div class="foot-utils">
           <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
@@ -560,6 +652,7 @@ function renderCard(c) {
       ` : `
         <div class="card-foot">
           <button data-action="card-edit-start" data-id="${escapeHtml(c.id)}">Edit status &amp; priority</button>
+          ${sb ? `<button data-action="editor-open" data-id="${escapeHtml(c.id)}">Edit details</button>` : ""}
         </div>
       `}
     </div>
@@ -687,8 +780,9 @@ function renderModsModal() {
 
 function renderAdminModal() {
   if (!state.adminOpen) return "";
-  const therapy = state.clinicians.filter(c => c.type === "therapy");
-  const psych = state.clinicians.filter(c => c.type === "psychiatry");
+  const therapy = state.clinicians.filter(c => c.type === "therapy" && c.active !== false);
+  const psych = state.clinicians.filter(c => c.type === "psychiatry" && c.active !== false);
+  const inactive = state.clinicians.filter(c => c.active === false);
   const row = (c) => {
     // A clinician can arrive via realtime while the modal is open — seed a
     // buffer lazily so render doesn't crash and edits to them still work.
@@ -743,10 +837,116 @@ function renderAdminModal() {
           ${therapy.map(row).join("")}
           <p class="admin-section-label spaced">Psychiatry</p>
           ${psych.map(row).join("")}
+          ${inactive.length ? `
+            <p class="admin-section-label spaced">Deactivated (hidden from staff)</p>
+            ${inactive.map(c => `
+              <div class="admin-row admin-row-inactive">
+                <div class="admin-row-head">
+                  <p class="admin-row-name">${escapeHtml(c.profile || c.name)}</p>
+                  <button class="btn-warn" data-action="editor-reactivate" data-id="${escapeHtml(c.id)}">Reactivate</button>
+                </div>
+              </div>
+            `).join("")}
+          ` : ""}
         </div>
         <div class="modal-foot">
           <button class="btn-save" data-action="admin-save">Save all changes</button>
           <button class="btn-cancel" data-action="admin-close">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderEditorModal() {
+  if (!state.editorId || !state.editorDraft) return "";
+  const d = state.editorDraft;
+  const isNew = state.editorId === "__new__";
+  const existing = isNew ? null : state.clinicians.find(c => c.id === state.editorId);
+  const check = (arr, v) => arr.includes(v) ? "checked" : "";
+  return `
+    <div class="modal-overlay">
+      <div class="modal modal-editor">
+        <div class="modal-head">
+          <div>
+            <span class="title">${isNew ? "Add clinician" : "Edit details — " + escapeHtml(existing ? existing.name : state.editorId)}</span>
+            <p class="sub">${isNew ? "Creates a new clinician for all staff." : "Status, priority, notes, specialties and modalities are edited from the card itself."}</p>
+          </div>
+          <button class="modal-close" data-action="editor-cancel">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${state.editorErrors && state.editorErrors.length ? `
+            <div class="editor-errors">${state.editorErrors.map(e => `<p>• ${escapeHtml(e)}</p>`).join("")}</div>
+          ` : ""}
+          <div class="editor-grid">
+            <div class="ed-field">
+              <label for="ed-name">Name *</label>
+              <input id="ed-name" class="edit-input" type="text" value="${escapeHtml(d.name)}" data-action="editor-field" data-field="name" placeholder="Jane Doe" />
+            </div>
+            <div class="ed-field">
+              <label for="ed-profile">Profile (name + credentials) *</label>
+              <input id="ed-profile" class="edit-input" type="text" value="${escapeHtml(d.profile)}" data-action="editor-field" data-field="profile" placeholder="Jane Doe, LMHC" />
+            </div>
+            <div class="ed-field">
+              <label>Provider type</label>
+              <div class="ed-type">
+                <button data-action="editor-type" data-type="therapy" class="${d.type === "therapy" ? "active" : ""}">Therapy</button>
+                <button data-action="editor-type" data-type="psychiatry" class="${d.type === "psychiatry" ? "active" : ""}">Psychiatry</button>
+              </div>
+            </div>
+            <div class="ed-field">
+              <label for="ed-schedule">Schedule *</label>
+              <input id="ed-schedule" class="edit-input" type="text" value="${escapeHtml(d.schedule)}" data-action="editor-field" data-field="schedule" placeholder="Mon-Fri" />
+            </div>
+            <div class="ed-field ed-span">
+              <label>Offices *</label>
+              <div class="ed-checks">
+                ${VALID_OFFICES.map(o => `
+                  <label><input type="checkbox" ${check(d.offices, o)} data-action="editor-office" data-office="${o}" /> ${o}</label>
+                `).join("")}
+                <label class="ed-virtual"><input type="checkbox" ${d.virtual ? "checked" : ""} data-action="editor-virtual" /> Offers telehealth (virtual)</label>
+              </div>
+            </div>
+            <div class="ed-field ed-span">
+              <label>Session groups * <span class="ed-hint">(what the Session type filters match on)</span></label>
+              <div class="ed-checks">
+                ${VALID_GROUPS.map(g => `
+                  <label><input type="checkbox" ${check(d.groups, g)} data-action="editor-group" data-group="${g}" /> ${g}</label>
+                `).join("")}
+              </div>
+            </div>
+            <div class="ed-field">
+              <label for="ed-indiv">Individual rate ($)</label>
+              <input id="ed-indiv" class="edit-input" type="text" inputmode="decimal" value="${escapeHtml(d.indiv)}" data-action="editor-field" data-field="indiv" placeholder="185" />
+            </div>
+            <div class="ed-field">
+              <label for="ed-indivdisplay">…or rate as text <span class="ed-hint">(sliding scale etc.)</span></label>
+              <input id="ed-indivdisplay" class="edit-input" type="text" value="${escapeHtml(d.indivDisplay)}" data-action="editor-field" data-field="indivDisplay" placeholder="$100-$150 (sliding scale)" />
+            </div>
+            <div class="ed-field">
+              <label for="ed-couples">Couples rate ($)</label>
+              <input id="ed-couples" class="edit-input" type="text" inputmode="decimal" value="${escapeHtml(d.couples)}" data-action="editor-field" data-field="couples" placeholder="235 or blank" />
+            </div>
+            <div class="ed-field">
+              <label for="ed-family">Family rate ($)</label>
+              <input id="ed-family" class="edit-input" type="text" inputmode="decimal" value="${escapeHtml(d.family)}" data-action="editor-field" data-field="family" placeholder="235 or blank" />
+            </div>
+          </div>
+          ${isNew ? `<p class="ed-note">New clinicians start as “Needs Clients / Medium Priority” with no specialties — set those from their card after saving.</p>` : ""}
+        </div>
+        <div class="modal-foot editor-foot">
+          <div>
+            <button class="btn-save" data-action="editor-save" ${state.editorBusy ? "disabled" : ""}>${state.editorBusy ? "Saving…" : (isNew ? "Add clinician" : "Save changes")}</button>
+            <button class="btn-cancel" data-action="editor-cancel">Cancel</button>
+          </div>
+          ${!isNew ? `
+          <div class="editor-danger">
+            ${existing && existing.active === false
+              ? `<button class="btn-warn" data-action="editor-reactivate" data-id="${escapeHtml(state.editorId)}">Reactivate</button>`
+              : `<button class="btn-warn" data-action="editor-deactivate" data-id="${escapeHtml(state.editorId)}" title="Hide from all staff — reversible">Deactivate</button>`}
+            <button class="btn-danger" data-action="editor-delete" data-id="${escapeHtml(state.editorId)}" title="Permanently delete — cannot be undone">Delete</button>
+          </div>
+          ` : ""}
         </div>
       </div>
     </div>
@@ -824,6 +1024,7 @@ function render() {
       ${renderModsModal()}
       ${renderAdminModal()}
       ${renderHealthModal()}
+      ${renderEditorModal()}
     `;
   }
 
@@ -1054,6 +1255,125 @@ function handleAction(action, el, ev) {
       return;
     }
 
+    // clinician editor (add / edit details / deactivate / delete)
+    case "editor-open": {
+      if (!sb) { alert("Adding and editing clinicians requires the shared database (currently in local fallback mode)."); return; }
+      const id = el.dataset.id;
+      if (id === "__new__") {
+        state.editorDraft = blankDraft();
+      } else {
+        const c = state.clinicians.find(x => x.id === id);
+        if (!c) return;
+        state.editorDraft = draftFromClinician(c);
+      }
+      state.editorId = id;
+      state.editorErrors = null;
+      state.editorBusy = false;
+      render();
+      return;
+    }
+    case "editor-cancel":
+      closeEditor();
+      render();
+      return;
+    case "editor-field":
+      if (state.editorDraft) state.editorDraft[el.dataset.field] = el.value;
+      return;
+    case "editor-type":
+      if (state.editorDraft) { state.editorDraft.type = el.dataset.type; render(); }
+      return;
+    case "editor-office":
+      if (state.editorDraft) { state.editorDraft.offices = toggleArr(state.editorDraft.offices, el.dataset.office); render(); }
+      return;
+    case "editor-group":
+      if (state.editorDraft) { state.editorDraft.groups = toggleArr(state.editorDraft.groups, el.dataset.group); render(); }
+      return;
+    case "editor-virtual":
+      if (state.editorDraft) { state.editorDraft.virtual = !state.editorDraft.virtual; render(); }
+      return;
+    case "editor-save": {
+      if (!state.editorDraft || state.editorBusy) return;
+      const errors = validateDraft(state.editorDraft);
+      if (errors.length) { state.editorErrors = errors; render(); return; }
+      const fields = draftToFields(state.editorDraft);
+      const isNew = state.editorId === "__new__";
+      state.editorBusy = true;
+      state.editorErrors = null;
+      render();
+      if (isNew) {
+        const record = {
+          id: generateId(fields.name),
+          ...fields,
+          accepting: "Needs Clients",
+          priority: "Medium Priority",
+          specialties: [],
+          modalities: [],
+          notes: "",
+        };
+        sb.from("clinicians").insert(record).select("id").then(({ error }) => {
+          if (error) { state.editorBusy = false; state.editorErrors = ["Could not add: " + error.message]; render(); return; }
+          const i = state.clinicians.findIndex(c => c.id === record.id);
+          if (i < 0) state.clinicians.push(record); // realtime may have added it already
+          closeEditor();
+          render();
+        }).catch(() => { state.editorBusy = false; state.editorErrors = ["Could not reach the database — check your connection."]; render(); });
+      } else {
+        const id = state.editorId;
+        sb.from("clinicians").update(fields).eq("id", id).select("id").then(({ data, error }) => {
+          if (error || !data || !data.length) {
+            state.editorBusy = false;
+            state.editorErrors = ["Could not save: " + (error ? error.message : "the clinician may have been deleted by a colleague.")];
+            render();
+            return;
+          }
+          state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, ...fields } : c);
+          closeEditor();
+          render();
+        }).catch(() => { state.editorBusy = false; state.editorErrors = ["Could not reach the database — check your connection."]; render(); });
+      }
+      return;
+    }
+    case "editor-deactivate": {
+      const id = el.dataset.id;
+      const c = state.clinicians.find(x => x.id === id);
+      if (!c) return;
+      if (!confirm(`Deactivate ${c.name}? They will be hidden from all staff, but can be reactivated from “Update all clinicians” at any time.`)) return;
+      sb.from("clinicians").update({ active: false }).eq("id", id).select("id").then(({ data, error }) => {
+        if (error || !data || !data.length) {
+          alert("Could not deactivate" + (error ? ": " + error.message : "") + (error && /active/i.test(error.message) ? "\n\n(The database needs the Phase 2 upgrade — run phase2-upgrade.sql in the Supabase SQL editor.)" : ""));
+          return;
+        }
+        state.clinicians = state.clinicians.map(x => x.id === id ? { ...x, active: false } : x);
+        closeEditor();
+        render();
+      }).catch(() => alert("Could not reach the database — nothing was changed."));
+      return;
+    }
+    case "editor-reactivate": {
+      const id = el.dataset.id;
+      sb.from("clinicians").update({ active: true }).eq("id", id).select("id").then(({ data, error }) => {
+        if (error || !data || !data.length) { alert("Could not reactivate" + (error ? ": " + error.message : "")); return; }
+        state.clinicians = state.clinicians.map(x => x.id === id ? { ...x, active: true } : x);
+        closeEditor();
+        render();
+      }).catch(() => alert("Could not reach the database — nothing was changed."));
+      return;
+    }
+    case "editor-delete": {
+      const id = el.dataset.id;
+      const c = state.clinicians.find(x => x.id === id);
+      if (!c) return;
+      if (!confirm(`PERMANENTLY delete ${c.name}? This cannot be undone — their notes, specialties, and history are gone for all staff.\n\nIf you just want to hide them, use Deactivate instead.`)) return;
+      if (!confirm(`Really delete ${c.name} forever?`)) return;
+      sb.from("clinicians").delete().eq("id", id).then(({ error }) => {
+        if (error) { alert("Could not delete: " + error.message); return; }
+        state.clinicians = state.clinicians.filter(x => x.id !== id);
+        closeEditor();
+        render();
+      }).catch(() => alert("Could not reach the database — nothing was deleted."));
+      return;
+    }
+
     // health check + backup
     case "health-open":
       state.healthResults = runAudit(state.clinicians);
@@ -1172,7 +1492,8 @@ document.addEventListener("submit", (ev) => {
 // Escape-to-close for any open modal
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
-  if (state.healthOpen) { state.healthOpen = false; render(); }
+  if (state.editorId) { closeEditor(); render(); }
+  else if (state.healthOpen) { state.healthOpen = false; render(); }
   else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; state.adminOriginal = null; render(); }
   else if (state.specsModalId) { state.specsModalId = null; state.modalSpecs = null; state.modalNewSpec = ""; render(); }
   else if (state.modsModalId) { state.modsModalId = null; state.modalMods = null; state.modalNewMod = ""; render(); }
