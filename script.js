@@ -422,7 +422,7 @@ function renderLogin() {
     <div class="login-wrap">
       <div class="login-card">
         <div class="login-header">
-          <img src="logo.png" alt="McNulty Counseling and Wellness" class="login-logo" />
+          <img src="logo.png?v=2" alt="McNulty Counseling and Wellness" class="login-logo" />
           <p class="login-title">Clinician Matcher</p>
           <p class="login-sub">Front office scheduling</p>
         </div>
@@ -469,7 +469,7 @@ function renderSidebar() {
   return `
     <div class="sidebar">
       <div class="sidebar-head">
-        <img src="logo.png" alt="McNulty Counseling and Wellness" class="sidebar-logo" />
+        <img src="logo.png?v=2" alt="McNulty Counseling and Wellness" class="sidebar-logo" />
         <p class="sidebar-sub">Clinician Matcher</p>
       </div>
       <div class="sidebar-body">
