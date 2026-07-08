@@ -899,7 +899,9 @@ function renderEditorModal() {
         <div class="modal-head">
           <div>
             <span class="title">${isNew ? "Add clinician" : "Edit details — " + escapeHtml(existing ? existing.name : state.editorId)}</span>
-            <p class="sub">${isNew ? "Creates a new clinician for all staff." : "Status, priority, notes, specialties and modalities are edited from the card itself."}</p>
+            <p class="sub">${isNew
+              ? "Creates a new clinician for all staff."
+              : `ID for the Google Sheet: <strong>${escapeHtml(state.editorId)}</strong> · Status, priority, notes, specialties and modalities are edited from the card itself.`}</p>
           </div>
           <button class="modal-close" data-action="editor-cancel">&times;</button>
         </div>
