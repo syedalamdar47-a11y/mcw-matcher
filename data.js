@@ -14,7 +14,7 @@ const SUPABASE_ANON_KEY = "sb_publishable_3yqQgb_zZJ_LaCdbMxHlbg_uaJ0OwzC";
 // Optional "accepting" column drives availability too. Leave csvUrl empty to
 // disable the feature. Column names are matched case-insensitively by header.
 const SHEET_SYNC = {
-  csvUrl: "",
+  csvUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vQEmxtXjT0bINiSunY37wFj8aXybnkHXU3mzP9DULKk8anvmYVGZ2-Yxc6i4HMVGUDfxf9tXTg2plO3/pub?gid=688683504&single=true&output=csv",
   idColumn: "id",
   priorityColumn: "priority",
   acceptingColumn: "accepting", // set to "" if the sheet shouldn't drive availability
