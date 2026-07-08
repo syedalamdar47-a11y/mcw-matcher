@@ -158,4 +158,29 @@ If Netlify ever tries to run a build command, something has gone wrong — check
 
 - GitHub owner: `syedalamdar47-a11y`
 - Netlify project slug: `mcw-clinician-matcher`
-- Password to log in to the live app: see `LOGIN_PASSWORD` in `data.js`
+- Live domains: `matcher.mcnultycounseling.com` (custom, via Cloudflare DNS CNAME → Netlify)
+  and `mcw-clinician-matcher.netlify.app`
+- Sign-in: per-staff email+password accounts in Supabase (see below). The old
+  `LOGIN_PASSWORD` in `data.js` is used ONLY if `SUPABASE_URL` is emptied (local mode).
+
+---
+
+## Shared backend (Supabase) — active since July 2026
+
+The app runs in **shared mode**: clinician data lives in a Supabase Postgres table
+(`clinicians`) and every staff member signs in with their own email+password.
+Edits save to the shared database and appear on colleagues' screens live.
+
+- **Project:** `mcw-matcher`, ref `gazzhqtqnmpyjejwujei` (supabase.com dashboard)
+- **Config:** `SUPABASE_URL` + `SUPABASE_ANON_KEY` at the top of `data.js`. The
+  publishable/anon key is safe to be public — Row Level Security means signed-out
+  visitors get zero rows. Emptying `SUPABASE_URL` reverts the app to the legacy
+  per-browser localStorage mode (useful as an emergency fallback).
+- **Library:** `supabase.min.js` is vendored in the repo (supabase-js v2.110.0,
+  pinned — do not swap for a CDN tag; CSP allows same-origin scripts only).
+- **Schema/setup:** `supabase-setup.sql` re-creates the table, RLS policies,
+  realtime publication, and seed data from scratch (one paste in the SQL editor).
+- **Add/remove staff:** Supabase dashboard → Authentication → Users. Public
+  sign-up should stay OFF (Authentication → Sign In / Providers).
+- **SEED_DATA in `data.js` is now only a fallback** for local mode. The database
+  is the source of truth for clinician data in shared mode.

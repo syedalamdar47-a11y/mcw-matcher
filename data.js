@@ -5,8 +5,8 @@ const LOGIN_PASSWORD = "mcw2025"; // used ONLY in local mode (when SUPABASE_URL 
 // Paste the project's values here to switch the app from per-browser localStorage
 // to the shared database with real per-staff logins. Leave empty for local-only mode.
 // The anon key is designed to be public — access is enforced server-side by RLS.
-const SUPABASE_URL = "";
-const SUPABASE_ANON_KEY = "";
+const SUPABASE_URL = "https://gazzhqtqnmpyjejwujei.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_3yqQgb_zZJ_LaCdbMxHlbg_uaJ0OwzC";
 
 const SEED_DATA = [
   { id:"kiesa", name:"Kiesa DeSimone", profile:"Kiesa DeSimone, LMHC", type:"therapy", offices:["Tyrone"], virtual:false, indiv:185, couples:null, family:null, schedule:"Mon-Fri", accepting:"Needs Clients", priority:"High Priority", groups:["Minors","Individuals"], modalities:["CBT","EMDR","DBT","ACT","EFT","Mindfulness-Based Therapy","Walk and Talk Therapy","Somatic"], specialties:["Anxiety","Depression","Grief","Trauma","Bipolar","Body Image","Self-esteem","ASD","Abuse/DV","LGBTQIA+","Divorce/Separation","Self-harm","Suicidal Ideation","Womens Issues","Mens Issues","Substance Abuse/Addiction"], notes:"Prefers clients with trauma history. Strong with complex trauma." },
