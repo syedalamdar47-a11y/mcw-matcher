@@ -47,6 +47,15 @@ const state = {
   sheetSyncBusy: false,
   sheetSyncReport: null, // result of the last Google-Sheet sync
   sheetReportOpen: false,
+  resetMode: false,      // "forgot password" email form showing
+  resetSent: false,
+  resetBusy: false,
+  resetError: "",
+  recoveryMode: false,   // arrived via a reset-email link — must set a new password
+  recoveryPw: "",
+  recoveryPw2: "",
+  recoveryBusy: false,
+  recoveryError: "",
 };
 
 const SPEC_LIMIT = 5;
@@ -454,6 +463,30 @@ function renderLogin() {
           <p class="login-title">Clinician Matcher</p>
           <p class="login-sub">Front office scheduling</p>
         </div>
+        ${sb && state.resetMode ? `
+        <form data-action="reset-send">
+          ${state.resetSent ? `
+            <p class="reset-done">✓ If that email has an account, a reset link is on its way. Open the email and click the link — it brings you back here to choose a new password.</p>
+            <button type="button" class="login-btn" data-action="reset-back">Back to sign in</button>
+          ` : `
+            <p class="reset-intro">Enter your work email and we'll send you a password-reset link.</p>
+            <label class="login-label" for="login-email">Email</label>
+            <input
+              id="login-email"
+              type="email"
+              class="login-input ${state.resetError ? "error" : ""}"
+              placeholder="you@mcnultycounseling.com"
+              value="${escapeHtml(state.loginEmail)}"
+              data-action="login-email-input"
+              autocomplete="username"
+              autofocus
+            />
+            ${state.resetError ? `<p class="login-error">${escapeHtml(state.resetError)}</p>` : ""}
+            <button type="submit" class="login-btn" ${state.resetBusy ? "disabled" : ""}>${state.resetBusy ? "Sending…" : "Send reset link"}</button>
+            <button type="button" class="login-forgot" data-action="reset-back">Back to sign in</button>
+          `}
+        </form>
+        ` : `
         <form data-action="login-submit">
           ${sb ? `
           <label class="login-label" for="login-email">Email</label>
@@ -480,6 +513,49 @@ function renderLogin() {
           />
           ${state.loginError ? `<p class="login-error">${sb ? "Sign-in failed. Check your email and password." : "Incorrect password. Please try again."}</p>` : ""}
           <button type="submit" class="login-btn" ${state.loginBusy ? "disabled" : ""}>${state.loginBusy ? "Signing in…" : "Sign in"}</button>
+          ${sb ? `<button type="button" class="login-forgot" data-action="reset-open">Forgot password?</button>` : ""}
+        </form>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// Shown after clicking the reset link from the email: choose a new password.
+function renderRecovery() {
+  return `
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="login-header">
+          <img src="logo.png?v=2" alt="McNulty Counseling and Wellness" class="login-logo" />
+          <p class="login-title">Choose a new password</p>
+          <p class="login-sub">You're resetting the password for your account</p>
+        </div>
+        <form data-action="recovery-save">
+          <label class="login-label" for="new-pw">New password</label>
+          <input
+            id="new-pw"
+            type="password"
+            class="login-input ${state.recoveryError ? "error" : ""}"
+            placeholder="At least 8 characters"
+            value="${escapeHtml(state.recoveryPw)}"
+            data-action="recovery-pw-input"
+            autocomplete="new-password"
+            autofocus
+          />
+          <label class="login-label" for="new-pw2">Repeat new password</label>
+          <input
+            id="new-pw2"
+            type="password"
+            class="login-input ${state.recoveryError ? "error" : ""}"
+            placeholder="Same password again"
+            value="${escapeHtml(state.recoveryPw2)}"
+            data-action="recovery-pw2-input"
+            autocomplete="new-password"
+          />
+          ${state.recoveryError ? `<p class="login-error">${escapeHtml(state.recoveryError)}</p>` : ""}
+          <button type="submit" class="login-btn" ${state.recoveryBusy ? "disabled" : ""}>${state.recoveryBusy ? "Saving…" : "Save new password"}</button>
+          <button type="button" class="login-forgot" data-action="recovery-cancel">Cancel</button>
         </form>
       </div>
     </div>
@@ -1074,7 +1150,9 @@ function render() {
   const selEnd = active && "selectionEnd" in active ? active.selectionEnd : null;
 
   const root = document.getElementById("app");
-  if (!state.authed) {
+  if (state.recoveryMode) {
+    root.innerHTML = renderRecovery();
+  } else if (!state.authed) {
     root.innerHTML = renderLogin();
   } else if (state.loading) {
     root.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#94a3b8;font-size:14px;">Loading…</div>`;
@@ -1134,6 +1212,90 @@ function handleAction(action, el, ev) {
     case "login-email-input":
       state.loginEmail = el.value;
       state.loginError = false;
+      state.resetError = "";
+      return;
+    case "reset-open":
+      state.resetMode = true;
+      state.resetSent = false;
+      state.resetError = "";
+      state.loginError = false;
+      render();
+      return;
+    case "reset-back":
+      state.resetMode = false;
+      state.resetSent = false;
+      state.resetError = "";
+      render();
+      return;
+    case "reset-send": {
+      ev.preventDefault();
+      if (state.resetBusy) return;
+      const email = state.loginEmail.trim();
+      if (!email) { state.resetError = "Enter your email address first."; render(); return; }
+      state.resetBusy = true;
+      state.resetError = "";
+      render();
+      sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname }).then(({ error }) => {
+        state.resetBusy = false;
+        if (error) state.resetError = error.message;
+        else state.resetSent = true;
+        render();
+      }).catch(() => {
+        state.resetBusy = false;
+        state.resetError = "Could not reach the server — check your connection and try again.";
+        render();
+      });
+      return;
+    }
+    case "recovery-pw-input":
+      state.recoveryPw = el.value;
+      state.recoveryError = "";
+      return;
+    case "recovery-pw2-input":
+      state.recoveryPw2 = el.value;
+      state.recoveryError = "";
+      return;
+    case "recovery-save": {
+      ev.preventDefault();
+      if (state.recoveryBusy) return;
+      if (state.recoveryPw.length < 8) { state.recoveryError = "Use at least 8 characters."; render(); return; }
+      if (state.recoveryPw !== state.recoveryPw2) { state.recoveryError = "The two passwords don't match."; render(); return; }
+      state.recoveryBusy = true;
+      render();
+      sb.auth.updateUser({ password: state.recoveryPw }).then(({ error }) => {
+        state.recoveryBusy = false;
+        if (error) { state.recoveryError = error.message; render(); return; }
+        // Password saved; the recovery link signed them in, so go straight to the app.
+        state.recoveryMode = false;
+        state.recoveryPw = "";
+        state.recoveryPw2 = "";
+        state.recoveryError = "";
+        history.replaceState(null, "", window.location.pathname); // drop the token from the URL
+        state.authed = true;
+        state.loading = true;
+        render();
+        loadClinicians().then(() => {
+          state.loading = false;
+          render();
+          subscribeRealtime();
+          if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
+        });
+      }).catch(() => {
+        state.recoveryBusy = false;
+        state.recoveryError = "Could not reach the server — check your connection and try again.";
+        render();
+      });
+      return;
+    }
+    case "recovery-cancel":
+      state.recoveryMode = false;
+      state.recoveryPw = "";
+      state.recoveryPw2 = "";
+      state.recoveryError = "";
+      history.replaceState(null, "", window.location.pathname);
+      sb.auth.signOut();
+      state.authed = false;
+      render();
       return;
     case "login-submit":
       ev.preventDefault();
@@ -1601,6 +1763,9 @@ async function boot() {
     // Shared mode: session comes from Supabase Auth, not sessionStorage.
     state.authed = false;
     state.loading = true;
+    // Arriving via a password-reset email link? Show the new-password form
+    // immediately (the hash carries type=recovery before supabase-js parses it).
+    if (window.location.hash.includes("type=recovery")) state.recoveryMode = true;
     render(); // show something immediately instead of a blank page
     try {
       const { data } = await sb.auth.getSession();
@@ -1610,7 +1775,12 @@ async function boot() {
     }
     // Single place that reacts to sign-in/sign-out (fires during
     // signInWithPassword, before its promise resolves).
-    sb.auth.onAuthStateChange((_event, session) => {
+    sb.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        state.recoveryMode = true;
+        render();
+        return;
+      }
       const nowAuthed = !!session;
       if (nowAuthed === state.authed) return;
       state.authed = nowAuthed;

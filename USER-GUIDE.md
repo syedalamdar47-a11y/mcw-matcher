@@ -158,8 +158,13 @@ Staff accounts are managed in the **Supabase dashboard**: **supabase.com** → s
 
 ### Someone forgot their password
 
-There's no self-serve reset link on the login page (yet). The admin resets it:
+**Self-serve (preferred):** on the login page, click **"Forgot password?"**, enter your work email, and click the link in the email you receive — it brings you back to the app to choose a new password (minimum 8 characters) and signs you in.
 
+Notes:
+- The email comes from Supabase (check spam the first time).
+- The free email service allows only a **couple of reset emails per hour** across the whole practice — fine for normal use, but don't spam the button.
+
+**Admin fallback** (no email needed):
 1. Authentication → Users → click the person's email
 2. Use the **⋮ / options menu** → **Update / reset password** if your dashboard shows it, and set a new one
 3. If you don't see that option, the always-works fallback: **Delete** the user and **Add user** again with the same email and a new password. This is completely safe — staff accounts hold no data; the roster lives separately.
