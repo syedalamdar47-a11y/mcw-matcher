@@ -52,3 +52,8 @@ const SEED_DATA = [
 
 const PRIORITY_ORDER = { "High Priority": 0, "Medium Priority": 1, "Low Priority": 2 };
 const STATUS_ORDER = { "Accepting": 0, "Needs Clients": 1, "Not Accepting": 2 };
+
+// Node (CI audit) compatibility — no effect in the browser.
+if (typeof module !== "undefined") {
+  module.exports = { STORAGE_KEY, SUPABASE_URL, SUPABASE_ANON_KEY, SHEET_SYNC, SEED_DATA, PRIORITY_ORDER, STATUS_ORDER };
+}

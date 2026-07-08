@@ -1,0 +1,38 @@
+# MCW Clinician Matcher — automated auditor
+# - Every push to main: syntax gate + data audit (catches a white-screen typo
+#   or bad clinician data the moment it lands; Netlify deploys in parallel,
+#   so a failure here is your signal to roll back).
+# - Nightly at 11:00 UTC (~6/7am Eastern): audits the LIVE database and the
+#   published Google Sheet, including sync drift.
+# - A failed run emails the repo owner via GitHub notifications.
+#
+# To enable the live-database checks, add two repository secrets
+# (Settings > Secrets and variables > Actions):
+#   AUDITOR_EMAIL / AUDITOR_PASSWORD  — a dedicated Supabase auth user.
+name: audit
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Syntax gate (white-screen protection)
+        run: |
+          node --check data.js
+          node --check audit.js
+          node --check script.js
+      - name: Data / sheet / live-db audit
+        env:
+          AUDITOR_EMAIL: ${{ secrets.AUDITOR_EMAIL }}
+          AUDITOR_PASSWORD: ${{ secrets.AUDITOR_PASSWORD }}
+        run: node scripts/audit-ci.mjs

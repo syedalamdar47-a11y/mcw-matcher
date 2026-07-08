@@ -174,7 +174,7 @@ function uniqueSorted(arr) {
 
 // ---------- clinician editor (add / edit details / deactivate / delete) ----------
 // Requires shared mode: the database is the source of truth for the roster.
-const VALID_GROUPS = ["Individuals", "Couples", "Families", "Minors"];
+// (VALID_OFFICES / VALID_GROUPS come from audit.js.)
 
 // Stable, unique, immutable id from a name: "Jane O'Brien" -> "jane_o_brien"
 // (suffixesed if taken). Ids never change after creation — the Google-Sheet
@@ -262,43 +262,7 @@ function closeEditor() {
 // name — the roster has duplicate first names), maps sheet values to the exact
 // enum strings, and writes only the rows that actually changed to the shared
 // database. Unrecognized values are reported, never guessed.
-const PRIORITY_ALIASES = {
-  "high": "High Priority", "high priority": "High Priority", "h": "High Priority", "1": "High Priority",
-  "medium": "Medium Priority", "medium priority": "Medium Priority", "med": "Medium Priority", "m": "Medium Priority", "2": "Medium Priority",
-  "low": "Low Priority", "low priority": "Low Priority", "l": "Low Priority", "3": "Low Priority",
-};
-const ACCEPTING_ALIASES = {
-  "accepting": "Accepting", "yes": "Accepting", "y": "Accepting", "open": "Accepting",
-  "needs clients": "Needs Clients", "needs": "Needs Clients", "needs clients urgently": "Needs Clients",
-  "not accepting": "Not Accepting", "no": "Not Accepting", "n": "Not Accepting", "closed": "Not Accepting", "full": "Not Accepting",
-};
-
-// Minimal RFC-4180 CSV parser: quoted fields, embedded commas/quotes, CRLF.
-function parseCsv(text) {
-  const rows = [];
-  let row = [], field = "", inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else field += ch;
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      row.push(field); field = "";
-    } else if (ch === "\n" || ch === "\r") {
-      if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(field); field = "";
-      rows.push(row); row = [];
-    } else {
-      field += ch;
-    }
-  }
-  if (field !== "" || row.length) { row.push(field); rows.push(row); }
-  return rows.filter(r => r.some(c => c.trim() !== ""));
-}
+// (parseCsv + PRIORITY_ALIASES / ACCEPTING_ALIASES come from audit.js.)
 
 async function syncFromSheet(openReport) {
   if (!sb || !SHEET_SYNC.csvUrl || state.sheetSyncBusy) return;
@@ -371,60 +335,8 @@ async function syncFromSheet(openReport) {
 }
 
 // ---------- automated auditor ----------
-// Pure function: runs data + logic consistency checks over the current roster.
-// Returns [{ severity: "error"|"warn"|"info", who, message }]. Shared by the
-// in-app Health Check panel now; the same rules can later feed a CI/cron runner.
-const VALID_OFFICES = ["DTSP", "Tyrone", "Tampa", "Sarasota", "Virtual"];
-function runAudit(clinicians) {
-  const issues = [];
-  const validPriority = Object.keys(PRIORITY_ORDER);
-  const validStatus = Object.keys(STATUS_ORDER);
-  const seen = {};
-  (clinicians || []).forEach(c => {
-    if (c.active === false) return; // deactivated clinicians are exempt from checks
-    const who = c.profile || c.name || c.id || "(unknown)";
-    if (seen[c.id]) issues.push({ severity: "error", who, message: `Duplicate id "${c.id}" — shared with ${seen[c.id]}. Their edits will collide.` });
-    else seen[c.id] = who;
-
-    ["name", "profile", "type", "schedule", "accepting", "priority"].forEach(f => {
-      if (!c[f]) issues.push({ severity: "error", who, message: `Missing required field "${f}".` });
-    });
-
-    if (c.priority && !validPriority.includes(c.priority)) issues.push({ severity: "error", who, message: `Priority "${c.priority}" is not one of the allowed values — it will sort incorrectly.` });
-    if (c.accepting && !validStatus.includes(c.accepting)) issues.push({ severity: "error", who, message: `Availability "${c.accepting}" is not an allowed value — it will sort incorrectly.` });
-    if (c.type && c.type !== "therapy" && c.type !== "psychiatry") issues.push({ severity: "error", who, message: `Type "${c.type}" is not "therapy" or "psychiatry".` });
-    (c.offices || []).forEach(o => { if (!VALID_OFFICES.includes(o)) issues.push({ severity: "warn", who, message: `Unknown office "${o}".` }); });
-
-    if (!Array.isArray(c.groups) || c.groups.length === 0) issues.push({ severity: "warn", who, message: `No client groups listed — this clinician may be hidden by session-type filters.` });
-
-    if (c.type === "therapy") {
-      if (!c.specialties || c.specialties.length === 0) issues.push({ severity: "warn", who, message: `Therapist has no specialties listed.` });
-      if (!c.modalities || c.modalities.length === 0) issues.push({ severity: "warn", who, message: `Therapist has no modalities listed.` });
-    }
-
-    const groups = c.groups || [];
-    if (c.couples && !groups.includes("Couples")) issues.push({ severity: "warn", who, message: `Has a couples rate but "Couples" is not in their groups — the Couples filter will hide them.` });
-    if (groups.includes("Couples") && !c.couples) issues.push({ severity: "info", who, message: `Lists the "Couples" group but has no couples rate.` });
-    if (c.family && !groups.includes("Families")) issues.push({ severity: "warn", who, message: `Has a family rate but "Families" is not in their groups — the Family filter will hide them.` });
-    if (groups.includes("Families") && !c.family) issues.push({ severity: "info", who, message: `Lists the "Families" group but has no family rate.` });
-    if (c.type === "therapy" && (c.indiv || c.indivDisplay) && !groups.includes("Individuals")) issues.push({ severity: "info", who, message: `Has an individual rate but "Individuals" is not in their groups.` });
-  });
-
-  // Runtime-only check (local mode): saved edits whose id no longer matches any clinician.
-  if (sb) return issues;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const saved = JSON.parse(raw);
-      const ids = new Set((clinicians || []).map(c => c.id));
-      Object.keys(saved).forEach(k => {
-        if (!ids.has(k)) issues.push({ severity: "warn", who: "(saved data)", message: `Stored edits for "${k}" don't match any current clinician — orphaned and invisible.` });
-      });
-    }
-  } catch {}
-
-  return issues;
-}
+// The audit rules live in audit.js (shared with CI / the nightly cloud audit).
+// runAudit / auditSheet / parseCsv / the alias maps are globals from there.
 
 // ---------- backup / restore ----------
 // Exports the same field set persist() writes, so import round-trips exactly.
@@ -1543,7 +1455,7 @@ function handleAction(action, el, ev) {
 
     // health check + backup
     case "health-open":
-      state.healthResults = runAudit(state.clinicians);
+      state.healthResults = runAudit(state.clinicians, { checkLocalStorage: !sb });
       state.healthOpen = true;
       render();
       return;
