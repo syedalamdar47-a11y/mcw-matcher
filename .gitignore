@@ -7,6 +7,16 @@ MCW_Clinician_Matcher.jsx
 # Alternative logo formats — only logo.png is referenced by the app
 logo.webp
 
+# SOP generation workspace — generated artifacts (heavy binaries + a capture
+# copy of the app). The reusable scripts + links.json stay tracked; the demo
+# instance, screenshots, and built .docx are regenerable and not committed.
+sop-workspace/app/
+sop-workspace/screenshots/
+sop-workspace/screenshots_annotated/
+sop-workspace/inspection/
+sop-workspace/boxes_*.json
+sop-workspace/output/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

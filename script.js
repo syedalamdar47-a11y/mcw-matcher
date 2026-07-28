@@ -1463,6 +1463,7 @@ function handleAction(action, el, ev) {
         state.authed = true;
         state.loginPw = "";
         state.loginError = false;
+        state.role = "full"; // local mode has no roles — full access
         if (state.clinicians.length === 0) loadClinicians();
       } else {
         state.loginError = true;
@@ -2066,6 +2067,7 @@ async function boot() {
     render();
     return;
   }
+  state.role = "full"; // local mode has no roles — full access
   loadClinicians();
   render();
 }

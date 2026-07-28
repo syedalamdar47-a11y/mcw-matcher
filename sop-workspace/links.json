@@ -1,0 +1,10 @@
+{
+  "_description": "Central URL catalog for MCW Clinician Matcher SOPs. Keys are short identifiers reused across build scripts. Links always point at production.",
+  "matcher": {
+    "name": "MCW Clinician Matcher",
+    "type": "Web app",
+    "access": "Edit",
+    "url": "https://matcher.mcnultycounseling.com",
+    "description": "The front-office web app where clinicians are searched, matched to clients, and managed. Used in SOP-001."
+  }
+}
