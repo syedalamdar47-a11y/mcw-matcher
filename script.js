@@ -58,9 +58,51 @@ const state = {
   recoveryPw2: "",
   recoveryBusy: false,
   recoveryError: "",
+  role: null,          // current user's role; "full" = pre-permissions (table not created yet)
+  teamOpen: false,
+  teamUsers: null,
+  teamBusy: false,
+  teamError: "",
+  inviteEmail: "",
+  inviteRole: "frontdesk",
+  inviteBusy: false,
+  inviteMsg: "",
 };
 
 const SPEC_LIMIT = 5;
+
+// ---------- roles & permissions ----------
+const ROLE_LABELS = { owner: "Owner", admin: "Admin", frontdesk: "Front Desk", viewer: "Viewer", full: "Owner" };
+
+// Loads the signed-in user's role. Fail-safe: if the user_roles table doesn't
+// exist yet (permissions not set up), everyone is "full" so nothing changes.
+async function loadRole() {
+  if (!sb) { state.role = "full"; return; }
+  try {
+    const { data: u } = await sb.auth.getUser();
+    const uid = u && u.user && u.user.id;
+    if (!uid) { state.role = "viewer"; return; }
+    const { data, error } = await sb.from("user_roles").select("role").eq("user_id", uid).maybeSingle();
+    if (error) { state.role = "full"; return; }      // table missing = pre-permissions
+    state.role = (data && data.role) || "viewer";    // table exists but no row = least privilege
+  } catch {
+    state.role = "full";
+  }
+}
+
+// Capability check used to gate every action in the UI. The database (RLS +
+// triggers from roles-setup.sql) is the real enforcement; this hides controls.
+function can(cap) {
+  const r = state.role;
+  const full = r === "full" || r === "owner";
+  switch (cap) {
+    case "editStatus": return r !== "viewer" && r !== null;             // frontdesk+
+    case "manageRoster": return full || r === "admin";                  // add/edit-details/deactivate
+    case "delete": return full;                                         // owner only
+    case "manageTeam": return full || r === "admin";                    // invite / roles
+    default: return false;
+  }
+}
 
 // ---------- helpers ----------
 function escapeHtml(s) {
@@ -653,14 +695,16 @@ function renderSidebar() {
         ${hasFilters ? `<button class="clear-all-btn" data-action="clear-all">Clear all filters</button>` : ""}
       </div>
       <div class="sidebar-foot">
-        ${sb ? `<button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>` : ""}
-        ${sb && SHEET_SYNC.csvUrl ? `<button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>` : ""}
-        <button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>
+        ${sb && can("manageRoster") ? `<button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>` : ""}
+        ${sb && can("manageTeam") ? `<button class="admin-btn" data-action="team-open">👥 Manage team</button>` : ""}
+        ${sb && SHEET_SYNC.csvUrl && can("editStatus") ? `<button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>` : ""}
+        ${can("editStatus") ? `<button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>` : ""}
         <div class="foot-utils">
           <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
-          <button data-action="export-backup" title="Download a backup of all edits">⬇ Backup</button>
-          <button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>
+          ${can("editStatus") ? `<button data-action="export-backup" title="Download a backup of all edits">⬇ Backup</button>` : ""}
+          ${!sb && can("editStatus") ? `<button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>` : ""}
         </div>
+        ${sb && state.role ? `<p class="role-line">Signed in · ${escapeHtml(ROLE_LABELS[state.role] || state.role)}</p>` : ""}
         <button class="signout-btn" data-action="signout">Sign out</button>
       </div>
     </div>
@@ -709,11 +753,13 @@ function renderCard(c) {
         <div class="section">
           <div class="section-head">
             <span class="section-title">Modalities</span>
-            <button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">edit</button>
+            ${can("editStatus") ? `<button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">edit</button>` : ""}
           </div>
           ${c.modalities.length
             ? `<p class="modalities-text">${escapeHtml(c.modalities.join(" · "))}</p>`
-            : `<button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">+ Add modalities</button>`
+            : (can("editStatus")
+              ? `<button class="section-edit" data-action="mods-modal-open" data-id="${escapeHtml(c.id)}">+ Add modalities</button>`
+              : `<p class="modalities-text" style="color:#94a3b8;">None listed</p>`)
           }
         </div>
 
@@ -721,7 +767,7 @@ function renderCard(c) {
           <div class="section">
             <div class="section-head">
               <span class="section-title">Specialties</span>
-              <button class="section-edit" data-action="specs-modal-open" data-id="${escapeHtml(c.id)}">edit</button>
+              ${can("editStatus") ? `<button class="section-edit" data-action="specs-modal-open" data-id="${escapeHtml(c.id)}">edit</button>` : ""}
             </div>
             <div class="spec-tags">
               ${visible.map(s => `<span class="spec-tag">${escapeHtml(s)}</span>`).join("")}
@@ -764,10 +810,12 @@ function renderCard(c) {
           </div>
         </div>
       ` : `
+        ${can("editStatus") || can("manageRoster") ? `
         <div class="card-foot">
-          <button data-action="card-edit-start" data-id="${escapeHtml(c.id)}">Edit status &amp; priority</button>
-          ${sb ? `<button data-action="editor-open" data-id="${escapeHtml(c.id)}">Edit details</button>` : ""}
+          ${can("editStatus") ? `<button data-action="card-edit-start" data-id="${escapeHtml(c.id)}">Edit status &amp; priority</button>` : ""}
+          ${sb && can("manageRoster") ? `<button data-action="editor-open" data-id="${escapeHtml(c.id)}">Edit details</button>` : ""}
         </div>
+        ` : ""}
       `}
     </div>
   `;
@@ -1077,7 +1125,7 @@ function renderEditorModal() {
             ${existing && existing.active === false
               ? `<button class="btn-warn" data-action="editor-reactivate" data-id="${escapeHtml(state.editorId)}">Reactivate</button>`
               : `<button class="btn-warn" data-action="editor-deactivate" data-id="${escapeHtml(state.editorId)}" title="Hide from all staff — reversible">Deactivate</button>`}
-            <button class="btn-danger" data-action="editor-delete" data-id="${escapeHtml(state.editorId)}" title="Permanently delete — cannot be undone">Delete</button>
+            ${can("delete") ? `<button class="btn-danger" data-action="editor-delete" data-id="${escapeHtml(state.editorId)}" title="Permanently delete — cannot be undone">Delete</button>` : ""}
           </div>
           ` : ""}
         </div>
@@ -1120,6 +1168,55 @@ function renderSheetReportModal() {
         </div>
         <div class="modal-foot">
           <button class="btn-cancel" data-action="sheet-report-close">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTeamModal() {
+  if (!state.teamOpen) return "";
+  const users = state.teamUsers || [];
+  const ownerLevel = state.role === "owner" || state.role === "full";
+  const assignable = ownerLevel ? ["admin", "frontdesk", "viewer"] : ["frontdesk", "viewer"];
+  const roleOpts = (selected) => assignable.map(r => `<option value="${r}" ${selected === r ? "selected" : ""}>${ROLE_LABELS[r]}</option>`).join("");
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">👥 Manage team</span>
+            <p class="sub">Invite staff and choose what each person can do.</p>
+          </div>
+          <button class="modal-close" data-action="team-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${state.teamError ? `<div class="audit-item audit-error"><span>${escapeHtml(state.teamError)}</span></div>` : ""}
+          <p class="admin-section-label">Invite someone</p>
+          <div class="team-invite">
+            <input id="invite-email" class="edit-input" type="email" placeholder="name@mcnultycounseling.com" value="${escapeHtml(state.inviteEmail)}" data-action="invite-email-input" autocomplete="off" />
+            <select data-action="invite-role-select">${roleOpts(state.inviteRole)}</select>
+            <button class="btn-save" data-action="invite-send" ${state.inviteBusy ? "disabled" : ""}>${state.inviteBusy ? "Sending…" : "Send invite"}</button>
+          </div>
+          ${state.inviteMsg ? `<p class="reset-done" style="margin-top:10px;">${escapeHtml(state.inviteMsg)}</p>` : ""}
+          <p class="admin-section-label spaced">Current team${users.length ? " (" + users.length + ")" : ""}</p>
+          ${state.teamBusy && !users.length ? `<p style="color:#94a3b8;font-size:13px;">Loading…</p>` : ""}
+          ${users.map(u => {
+            const rowOwner = u.role === "owner";
+            return `
+              <div class="team-row">
+                <div class="team-user">${escapeHtml(u.email || u.user_id)} <span class="team-role-badge role-${u.role}">${ROLE_LABELS[u.role] || u.role}</span></div>
+                <div class="team-actions">
+                  ${rowOwner
+                    ? `<span class="team-owner-lock">Practice owner</span>`
+                    : `<select data-action="team-role-change" data-uid="${escapeHtml(u.user_id)}">${roleOpts(u.role)}</select>
+                       <button class="btn-danger" data-action="team-remove" data-uid="${escapeHtml(u.user_id)}" data-email="${escapeHtml(u.email || "")}">Remove</button>`}
+                </div>
+              </div>`;
+          }).join("")}
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="team-close">Close</button>
         </div>
       </div>
     </div>
@@ -1201,6 +1298,7 @@ function render() {
       ${renderHealthModal()}
       ${renderEditorModal()}
       ${renderSheetReportModal()}
+      ${renderTeamModal()}
     `;
   }
 
@@ -1300,7 +1398,7 @@ function handleAction(action, el, ev) {
         state.authed = true;
         state.loading = true;
         render();
-        loadClinicians().then(() => {
+        Promise.all([loadClinicians(), loadRole()]).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -1369,6 +1467,9 @@ function handleAction(action, el, ev) {
       if (sb) {
         sb.auth.signOut();
         state.clinicians = [];
+        state.role = null;
+        state.teamOpen = false;
+        state.teamUsers = null;
       }
       sessionStorage.removeItem("mcw_auth");
       state.authed = false;
@@ -1579,6 +1680,91 @@ function handleAction(action, el, ev) {
     case "editor-mod-remove":
       if (state.editorDraft) { state.editorDraft.modalities = state.editorDraft.modalities.filter(m => m !== el.dataset.val); render(); }
       return;
+
+    // team / roles management
+    case "team-open": {
+      if (!can("manageTeam")) return;
+      state.teamOpen = true;
+      state.teamBusy = true;
+      state.teamError = "";
+      state.inviteMsg = "";
+      render();
+      sb.from("user_roles").select("user_id,email,role").then(({ data, error }) => {
+        state.teamBusy = false;
+        if (error) {
+          state.teamError = /user_roles|does not exist/i.test(error.message)
+            ? "The roles system isn't set up yet — run roles-setup.sql in the Supabase SQL editor first."
+            : "Could not load the team: " + error.message;
+        } else {
+          const order = { owner: 0, admin: 1, frontdesk: 2, viewer: 3 };
+          state.teamUsers = (data || []).sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9) || (a.email || "").localeCompare(b.email || ""));
+        }
+        render();
+      });
+      return;
+    }
+    case "team-close":
+      state.teamOpen = false;
+      render();
+      return;
+    case "invite-email-input":
+      state.inviteEmail = el.value;
+      state.inviteMsg = "";
+      state.teamError = "";
+      return;
+    case "invite-role-select":
+      state.inviteRole = el.value;
+      return;
+    case "invite-send": {
+      if (state.inviteBusy) return;
+      const email = state.inviteEmail.trim();
+      if (!email) { state.teamError = "Enter an email address to invite."; render(); return; }
+      state.inviteBusy = true;
+      state.teamError = "";
+      state.inviteMsg = "";
+      render();
+      sb.functions.invoke("manage-team", { body: { action: "invite", email, role: state.inviteRole } }).then(({ data, error }) => {
+        state.inviteBusy = false;
+        const errMsg = error ? error.message : (data && data.error);
+        if (errMsg) {
+          state.teamError = /not found|failed to send a request|Failed to fetch/i.test(errMsg)
+            ? "Invite couldn't be sent — the team-management function isn't deployed yet (see setup steps). Role changes still work."
+            : "Invite failed: " + errMsg;
+        } else {
+          state.inviteMsg = `Invite sent to ${email}. They'll get an email to set their password.`;
+          state.inviteEmail = "";
+          if (data && data.user_id) state.teamUsers = [...(state.teamUsers || []), { user_id: data.user_id, email, role: state.inviteRole }];
+        }
+        render();
+      }).catch(() => {
+        state.inviteBusy = false;
+        state.teamError = "Invite couldn't be sent — the team-management function isn't deployed yet (see setup steps).";
+        render();
+      });
+      return;
+    }
+    case "team-role-change": {
+      const uid = el.dataset.uid;
+      const role = el.value;
+      sb.from("user_roles").update({ role, updated_at: new Date().toISOString() }).eq("user_id", uid).select("user_id").then(({ data, error }) => {
+        if (error || !data || !data.length) { alert("Could not change role: " + (error ? error.message : "you may not have permission.")); handleAction("team-open", document.body, new Event("click")); }
+        else state.teamUsers = (state.teamUsers || []).map(u => u.user_id === uid ? { ...u, role } : u);
+        render();
+      });
+      return;
+    }
+    case "team-remove": {
+      const uid = el.dataset.uid;
+      const email = el.dataset.email;
+      if (!confirm(`Remove ${email || "this person"}? They will no longer be able to sign in.`)) return;
+      sb.functions.invoke("manage-team", { body: { action: "remove", user_id: uid } }).then(({ data, error }) => {
+        const errMsg = error ? error.message : (data && data.error);
+        if (errMsg) alert("Could not remove: " + errMsg + "\n\n(If the team-management function isn't deployed yet, set the person to Viewer instead to revoke their access.)");
+        else { state.teamUsers = (state.teamUsers || []).filter(u => u.user_id !== uid); render(); }
+      }).catch(() => alert("Could not remove — the team-management function isn't deployed yet. Set the person to Viewer to revoke access in the meantime."));
+      return;
+    }
+
     case "editor-save": {
       if (!state.editorDraft || state.editorBusy) return;
       const errors = validateDraft(state.editorDraft);
@@ -1788,6 +1974,7 @@ document.addEventListener("submit", (ev) => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
   if (state.editorId) { closeEditor(); render(); }
+  else if (state.teamOpen) { state.teamOpen = false; render(); }
   else if (state.sheetReportOpen) { state.sheetReportOpen = false; render(); }
   else if (state.healthOpen) { state.healthOpen = false; render(); }
   else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; state.adminOriginal = null; render(); }
@@ -1821,9 +2008,9 @@ async function boot() {
     // Shared mode: session comes from Supabase Auth, not sessionStorage.
     state.authed = false;
     state.loading = true;
-    // Arriving via a password-reset email link? Show the new-password form
-    // immediately (the hash carries type=recovery before supabase-js parses it).
-    if (window.location.hash.includes("type=recovery")) state.recoveryMode = true;
+    // Arriving via a password-reset OR invite email link? Show the set-password
+    // form (the hash carries type=recovery / type=invite before supabase-js parses it).
+    if (window.location.hash.includes("type=recovery") || window.location.hash.includes("type=invite")) state.recoveryMode = true;
     render(); // show something immediately instead of a blank page
     try {
       const { data } = await sb.auth.getSession();
@@ -1845,7 +2032,7 @@ async function boot() {
       if (nowAuthed) {
         state.loading = true;
         render();
-        loadClinicians().then(() => {
+        Promise.all([loadClinicians(), loadRole()]).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -1856,7 +2043,7 @@ async function boot() {
       }
     });
     if (state.authed) {
-      await loadClinicians();
+      await Promise.all([loadClinicians(), loadRole()]);
       subscribeRealtime();
       if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
     }
