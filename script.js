@@ -1029,20 +1029,23 @@ function renderEditorModal() {
   const allSpecs = uniqueSorted(state.clinicians.flatMap(x => x.specialties || []));
   const allMods = uniqueSorted(state.clinicians.flatMap(x => x.modalities || []));
   const picker = (label, kind, items, all, newVal) => {
-    const q = newVal.trim().toLowerCase();
-    const matches = q ? all.filter(v => !items.includes(v) && v.toLowerCase().includes(q)).slice(0, 8) : [];
+    // Show every known option as a checklist (selected ones checked); any custom
+    // value the clinic added still appears, checked, at the top of the list.
+    const options = uniqueSorted([...all, ...items]);
     return `
     <div class="ed-field ed-span">
-      <label>${label}</label>
-      <div class="ed-chips">
-        ${items.map(v => `<span class="chip chip-spec">${escapeHtml(v)}<button type="button" data-action="editor-${kind}-remove" data-val="${escapeHtml(v)}" aria-label="Remove ${escapeHtml(v)}">×</button></span>`).join("")}
-        ${items.length === 0 ? `<span class="ed-chips-empty">None added yet</span>` : ""}
+      <label>${label} <span class="ed-hint">(${items.length} selected — check to include)</span></label>
+      <div class="ed-check-grid">
+        ${options.map(v => `
+          <label class="ed-check">
+            <input type="checkbox" data-action="editor-${kind}-toggle" data-val="${escapeHtml(v)}" ${items.includes(v) ? "checked" : ""} />
+            <span>${escapeHtml(v)}</span>
+          </label>`).join("")}
       </div>
       <div class="ed-add-row">
-        <input id="ed-${kind}-input" class="edit-input" type="text" placeholder="Type to search or add…" value="${escapeHtml(newVal)}" data-action="editor-${kind}-newinput" autocomplete="off" />
+        <input id="ed-${kind}-input" class="edit-input" type="text" placeholder="Add one that isn't listed…" value="${escapeHtml(newVal)}" data-action="editor-${kind}-newinput" autocomplete="off" />
         <button type="button" class="btn-cancel" data-action="editor-${kind}-add">Add</button>
       </div>
-      ${matches.length ? `<div class="ed-suggest">${matches.map(v => `<button type="button" class="ed-suggest-item" data-action="editor-${kind}-pick" data-val="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join("")}</div>` : ""}
     </div>`;
   };
   return `
@@ -1684,14 +1687,12 @@ function handleAction(action, el, ev) {
     case "editor-mod-remove":
       if (state.editorDraft) { state.editorDraft.modalities = state.editorDraft.modalities.filter(m => m !== el.dataset.val); render(); }
       return;
-    case "editor-spec-pick":
-      if (state.editorDraft && el.dataset.val && !state.editorDraft.specialties.some(s => s.toLowerCase() === el.dataset.val.toLowerCase())) state.editorDraft.specialties.push(el.dataset.val);
-      state.editorNewSpec = "";
+    case "editor-spec-toggle":
+      if (state.editorDraft) state.editorDraft.specialties = toggleArr(state.editorDraft.specialties, el.dataset.val);
       render();
       return;
-    case "editor-mod-pick":
-      if (state.editorDraft && el.dataset.val && !state.editorDraft.modalities.some(m => m.toLowerCase() === el.dataset.val.toLowerCase())) state.editorDraft.modalities.push(el.dataset.val);
-      state.editorNewMod = "";
+    case "editor-mod-toggle":
+      if (state.editorDraft) state.editorDraft.modalities = toggleArr(state.editorDraft.modalities, el.dataset.val);
       render();
       return;
 
