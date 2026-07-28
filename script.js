@@ -44,6 +44,8 @@ const state = {
   editorDraft: null,   // buffered field values for the editor form
   editorErrors: null,  // validation / save errors shown in the editor
   editorBusy: false,
+  editorNewSpec: "",   // text buffer for the "add specialty" input in the editor
+  editorNewMod: "",    // text buffer for the "add modality" input in the editor
   sheetSyncBusy: false,
   sheetSyncReport: null, // result of the last Google-Sheet sync
   sheetReportOpen: false,
@@ -210,11 +212,13 @@ function draftFromClinician(c) {
     family: c.family == null ? "" : String(c.family),
     schedule: c.schedule || "",
     groups: (c.groups || []).slice(),
+    specialties: (c.specialties || []).slice(),
+    modalities: (c.modalities || []).slice(),
   };
 }
 
 function blankDraft() {
-  return { name: "", profile: "", type: "therapy", offices: [], virtual: false, indiv: "", indivDisplay: "", couples: "", family: "", schedule: "", groups: [] };
+  return { name: "", profile: "", type: "therapy", offices: [], virtual: false, indiv: "", indivDisplay: "", couples: "", family: "", schedule: "", groups: [], specialties: [], modalities: [] };
 }
 
 // Parses a rate input: "" -> null, otherwise must be a positive number.
@@ -240,9 +244,10 @@ function validateDraft(d) {
   return errors;
 }
 
-// The editor owns ONLY the identity/detail fields. Status, priority, notes,
-// specialties, and modalities keep their own editors so concurrent edits by
-// different staff don't overwrite each other.
+// The editor owns the identity/detail fields plus specialties & modalities.
+// Status, priority, and notes keep their own card editors so concurrent edits
+// by different staff don't overwrite each other. Specialties/modalities can
+// also still be quick-edited from the card's "edit" links (same fields).
 function draftToFields(d) {
   return {
     name: d.name.trim(),
@@ -256,6 +261,8 @@ function draftToFields(d) {
     family: parseRate(d.family).value,
     schedule: d.schedule.trim(),
     groups: d.groups,
+    specialties: d.specialties,
+    modalities: d.modalities,
   };
 }
 
@@ -264,6 +271,8 @@ function closeEditor() {
   state.editorDraft = null;
   state.editorErrors = null;
   state.editorBusy = false;
+  state.editorNewSpec = "";
+  state.editorNewMod = "";
 }
 
 // ---------- Google Sheet -> priority sync ----------
@@ -969,6 +978,21 @@ function renderEditorModal() {
   const isNew = state.editorId === "__new__";
   const existing = isNew ? null : state.clinicians.find(c => c.id === state.editorId);
   const check = (arr, v) => arr.includes(v) ? "checked" : "";
+  const allSpecs = uniqueSorted(state.clinicians.flatMap(x => x.specialties || []));
+  const allMods = uniqueSorted(state.clinicians.flatMap(x => x.modalities || []));
+  const picker = (label, kind, items, all, newVal) => `
+    <div class="ed-field ed-span">
+      <label>${label}</label>
+      <div class="ed-chips">
+        ${items.map(v => `<span class="chip chip-spec">${escapeHtml(v)}<button type="button" data-action="editor-${kind}-remove" data-val="${escapeHtml(v)}" aria-label="Remove ${escapeHtml(v)}">×</button></span>`).join("")}
+        ${items.length === 0 ? `<span class="ed-chips-empty">None added yet</span>` : ""}
+      </div>
+      <div class="ed-add-row">
+        <input id="ed-${kind}-input" class="edit-input" type="text" list="ed-${kind}-list" placeholder="Type and press Enter to add…" value="${escapeHtml(newVal)}" data-action="editor-${kind}-newinput" autocomplete="off" />
+        <button type="button" class="btn-cancel" data-action="editor-${kind}-add">Add</button>
+        <datalist id="ed-${kind}-list">${all.filter(v => !items.includes(v)).map(v => `<option value="${escapeHtml(v)}"></option>`).join("")}</datalist>
+      </div>
+    </div>`;
   return `
     <div class="modal-overlay">
       <div class="modal modal-editor">
@@ -977,7 +1001,7 @@ function renderEditorModal() {
             <span class="title">${isNew ? "Add clinician" : "Edit details — " + escapeHtml(existing ? existing.name : state.editorId)}</span>
             <p class="sub">${isNew
               ? "Creates a new clinician for all staff."
-              : `ID for the Google Sheet: <strong>${escapeHtml(state.editorId)}</strong> · Status, priority, notes, specialties and modalities are edited from the card itself.`}</p>
+              : `ID for the Google Sheet: <strong>${escapeHtml(state.editorId)}</strong> · Availability, priority and notes are edited from the card itself.`}</p>
           </div>
           <button class="modal-close" data-action="editor-cancel">&times;</button>
         </div>
@@ -1038,8 +1062,10 @@ function renderEditorModal() {
               <label for="ed-family">Family rate ($)</label>
               <input id="ed-family" class="edit-input" type="text" inputmode="decimal" value="${escapeHtml(d.family)}" data-action="editor-field" data-field="family" placeholder="235 or blank" />
             </div>
+            ${picker("Specialties", "spec", d.specialties, allSpecs, state.editorNewSpec)}
+            ${picker("Modalities", "mod", d.modalities, allMods, state.editorNewMod)}
           </div>
-          ${isNew ? `<p class="ed-note">New clinicians start as “Needs Clients / Medium Priority” with no specialties — set those from their card after saving.</p>` : ""}
+          ${isNew ? `<p class="ed-note">New clinicians start as “Needs Clients / Medium Priority” — set their availability and priority from the card after saving.</p>` : ""}
         </div>
         <div class="modal-foot editor-foot">
           <div>
@@ -1525,6 +1551,34 @@ function handleAction(action, el, ev) {
     case "editor-virtual":
       if (state.editorDraft) { state.editorDraft.virtual = !state.editorDraft.virtual; render(); }
       return;
+    case "editor-spec-newinput":
+      state.editorNewSpec = el.value;
+      return;
+    case "editor-mod-newinput":
+      state.editorNewMod = el.value;
+      return;
+    case "editor-spec-add": {
+      if (!state.editorDraft) return;
+      const t = state.editorNewSpec.trim();
+      if (t && !state.editorDraft.specialties.some(s => s.toLowerCase() === t.toLowerCase())) state.editorDraft.specialties.push(t);
+      state.editorNewSpec = "";
+      render();
+      return;
+    }
+    case "editor-mod-add": {
+      if (!state.editorDraft) return;
+      const t = state.editorNewMod.trim();
+      if (t && !state.editorDraft.modalities.some(m => m.toLowerCase() === t.toLowerCase())) state.editorDraft.modalities.push(t);
+      state.editorNewMod = "";
+      render();
+      return;
+    }
+    case "editor-spec-remove":
+      if (state.editorDraft) { state.editorDraft.specialties = state.editorDraft.specialties.filter(s => s !== el.dataset.val); render(); }
+      return;
+    case "editor-mod-remove":
+      if (state.editorDraft) { state.editorDraft.modalities = state.editorDraft.modalities.filter(m => m !== el.dataset.val); render(); }
+      return;
     case "editor-save": {
       if (!state.editorDraft || state.editorBusy) return;
       const errors = validateDraft(state.editorDraft);
@@ -1537,11 +1591,9 @@ function handleAction(action, el, ev) {
       if (isNew) {
         const record = {
           id: generateId(fields.name),
-          ...fields,
+          ...fields, // includes specialties & modalities from the form
           accepting: "Needs Clients",
           priority: "Medium Priority",
-          specialties: [],
-          modalities: [],
           notes: "",
         };
         sb.from("clinicians").insert(record).select("id").then(({ error }) => {
@@ -1754,6 +1806,12 @@ document.addEventListener("keydown", (ev) => {
   } else if (el.dataset.action === "modal-mod-newinput") {
     ev.preventDefault();
     handleAction("modal-mod-add", el, ev);
+  } else if (el.dataset.action === "editor-spec-newinput") {
+    ev.preventDefault();
+    handleAction("editor-spec-add", el, ev);
+  } else if (el.dataset.action === "editor-mod-newinput") {
+    ev.preventDefault();
+    handleAction("editor-mod-add", el, ev);
   }
 });
 
