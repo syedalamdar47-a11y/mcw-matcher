@@ -216,6 +216,11 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background:
 .ed-add-row { display: flex; gap: 6px; }
 .ed-add-row input { flex: 1; }
 .ed-add-row button { flex-shrink: 0; padding: 7px 12px; }
+/* Suggestion list appears directly under the input (not the browser's native popup) */
+.ed-suggest { margin-top: 6px; border: 1px solid #cbd5e1; border-radius: 8px; max-height: 190px; overflow-y: auto; background: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+.ed-suggest-item { display: block; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid #f1f5f9; padding: 8px 12px; font-size: 13px; color: #0f172a; cursor: pointer; }
+.ed-suggest-item:last-child { border-bottom: none; }
+.ed-suggest-item:hover { background: #f0fdf4; color: #1e4d2b; }
 .editor-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .editor-danger { display: flex; gap: 8px; }
 .btn-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 7px 12px; font-size: 12.5px; cursor: pointer; }
