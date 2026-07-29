@@ -46,6 +46,10 @@ const state = {
   editorBusy: false,
   editorNewSpec: "",   // text buffer for the "add specialty" input in the editor
   editorNewMod: "",    // text buffer for the "add modality" input in the editor
+  help: null,          // key of the open ⓘ popover topic (see help.js)
+  helpAnchor: null,    // element id of the ⓘ button it points at
+  helpPanelOpen: false,
+  helpPanelSearch: "",
   sheetSyncBusy: false,
   sheetSyncReport: null, // result of the last Google-Sheet sync
   sheetReportOpen: false,
@@ -70,6 +74,106 @@ const state = {
 };
 
 const SPEC_LIMIT = 5;
+
+// ---------- in-app help (ⓘ) ----------
+// Content lives in help.js (globals HELP + HELP_GROUPS) so the popovers and the
+// "? Help" panel always say the same thing. A single popover is rendered as a
+// fixed top-level layer — per-control popovers would be clipped by the
+// overflow-hidden sidebar and would sit under the z-index:50 modals.
+function helpIcon(topic) {
+  if (typeof HELP === "undefined" || !HELP[topic]) return "";
+  const open = state.help === topic;
+  return `<button type="button" class="help-i${open ? " active" : ""}" id="help-anchor-${escapeHtml(topic)}"`
+    + ` data-action="help-open" data-topic="${escapeHtml(topic)}" aria-expanded="${open}"`
+    + ` aria-controls="help-popover" aria-label="What is ${escapeHtml(HELP[topic].title)}?" title="What is this?">i</button>`;
+}
+
+function renderHelpPopover() {
+  if (!state.help || typeof HELP === "undefined") return "";
+  const h = HELP[state.help];
+  if (!h) return "";
+  return `
+    <div class="help-backdrop" data-action="help-close"></div>
+    <div class="help-popover" id="help-popover" role="dialog" aria-label="Help: ${escapeHtml(h.title)}" tabindex="-1" style="top:-9999px;left:0;">
+      <div class="help-pop-head">
+        <span class="help-pop-title">${escapeHtml(h.title)}</span>
+        <button type="button" class="help-pop-close" data-action="help-close" aria-label="Close help">&times;</button>
+      </div>
+      <p>${escapeHtml(h.what)}</p>
+      <p>${escapeHtml(h.how)}</p>
+      ${h.tip ? `<p class="help-tip">${escapeHtml(h.tip)}</p>` : ""}
+      ${h.role ? `<p class="help-role">${escapeHtml(h.role)}</p>` : ""}
+    </div>`;
+}
+
+function renderHelpPanel() {
+  if (!state.helpPanelOpen || typeof HELP === "undefined") return "";
+  const q = state.helpPanelSearch.trim().toLowerCase();
+  const match = (k) => {
+    const h = HELP[k];
+    if (!h) return false;
+    if (!q) return true;
+    return [h.title, h.what, h.how, h.tip, h.role].some(v => String(v || "").toLowerCase().includes(q));
+  };
+  const groups = HELP_GROUPS.map(g => ({ group: g.group, keys: g.keys.filter(match) })).filter(g => g.keys.length);
+  const total = groups.reduce((n, g) => n + g.keys.length, 0);
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">? Help</span>
+            <p class="sub">Every part of this app, explained. Search or browse below.</p>
+          </div>
+          <button class="modal-close" data-action="help-panel-close" aria-label="Close help">&times;</button>
+        </div>
+        <div class="modal-body">
+          <input id="help-panel-search" class="edit-input" type="text" placeholder="Search help — e.g. priority, invite, sheet…"
+                 value="${escapeHtml(state.helpPanelSearch)}" data-action="help-panel-search" autocomplete="off" />
+          ${total === 0 ? `<p class="help-empty">Nothing matches “${escapeHtml(state.helpPanelSearch)}”. Try a simpler word, like “priority” or “sheet”.</p>` : ""}
+          ${groups.map(g => `
+            <p class="admin-section-label spaced">${escapeHtml(g.group)}</p>
+            ${g.keys.map(k => {
+              const h = HELP[k];
+              return `<div class="help-item">
+                <p class="help-item-title">${escapeHtml(h.title)}</p>
+                <p>${escapeHtml(h.what)}</p>
+                <p>${escapeHtml(h.how)}</p>
+                ${h.tip ? `<p class="help-tip">${escapeHtml(h.tip)}</p>` : ""}
+                ${h.role ? `<p class="help-role">${escapeHtml(h.role)}</p>` : ""}
+              </div>`;
+            }).join("")}
+          `).join("")}
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="help-panel-close">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// Anchors the popover under its ⓘ, flipping/clamping to stay on screen.
+// On phones CSS turns it into a bottom sheet, so positioning is skipped.
+function positionHelpPopover() {
+  const pop = document.getElementById("help-popover");
+  if (!pop) return;
+  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  if (!vw || !vh) return;                       // viewport not measurable yet
+  if (vw <= 768) { pop.style.top = ""; pop.style.left = ""; return; }  // CSS bottom-sheet
+  const anchor = state.helpAnchor && document.getElementById(state.helpAnchor);
+  if (!anchor) { pop.style.top = "80px"; pop.style.left = "20px"; return; }
+  const a = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth || 300, h = pop.offsetHeight || 160, gap = 6, edge = 8;
+  let top = a.bottom + gap;
+  if (top + h > vh - edge) {
+    const above = a.top - gap - h;
+    top = above >= edge ? above : Math.max(edge, vh - h - edge);
+  }
+  let left = Math.min(Math.max(edge, a.left), Math.max(edge, vw - w - edge));
+  pop.style.top = Math.round(top) + "px";
+  pop.style.left = Math.round(left) + "px";
+}
 
 // ---------- roles & permissions ----------
 const ROLE_LABELS = { owner: "Owner", admin: "Admin", frontdesk: "Front Desk", viewer: "Viewer", full: "Owner" };
@@ -582,7 +686,7 @@ function renderLogin() {
           />
           ${state.loginError ? `<p class="login-error">${sb ? "Sign-in failed. Check your email and password." : "Incorrect password. Please try again."}</p>` : ""}
           <button type="submit" class="login-btn" ${state.loginBusy ? "disabled" : ""}>${state.loginBusy ? "Signing in…" : "Sign in"}</button>
-          ${sb ? `<button type="button" class="login-forgot" data-action="reset-open">Forgot password?</button>` : ""}
+          ${sb ? `<button type="button" class="login-forgot" data-action="reset-open">Forgot password?</button> ${helpIcon("forgot-password")}` : ""}
         </form>
         `}
       </div>
@@ -646,10 +750,13 @@ function renderSidebar() {
         <p class="sidebar-sub">Clinician Matcher</p>
       </div>
       <div class="sidebar-body">
-        <input id="search-input" class="side-input" type="text" placeholder="Search name, specialty, modality…" value="${escapeHtml(state.search)}" data-action="search-input" />
+        <div class="side-search-wrap">
+          <input id="search-input" class="side-input" type="text" placeholder="Search name, specialty, modality…" value="${escapeHtml(state.search)}" data-action="search-input" />
+          ${helpIcon("search")}
+        </div>
 
         <div>
-          <p class="side-label">Provider type</p>
+          <p class="side-label">Provider type ${helpIcon("provider-type")}</p>
           <div class="type-toggle">
             <button data-action="type-set" data-type="therapy" class="${state.typeFilter === "therapy" ? "active" : ""}">therapy</button>
             <button data-action="type-set" data-type="psychiatry" class="${state.typeFilter === "psychiatry" ? "active" : ""}">psychiatry</button>
@@ -669,7 +776,7 @@ function renderSidebar() {
         </div>
 
         <div>
-          <p class="side-label">Session type</p>
+          <p class="side-label">Session type ${helpIcon("session-type")}</p>
           <div class="side-checklist">
             ${["Individual","Couples","Family","Minors"].map(st => `
               <label class="check-row">
@@ -682,7 +789,7 @@ function renderSidebar() {
 
         ${state.typeFilter === "therapy" ? `
           <div>
-            <p class="side-label">Specialty</p>
+            <p class="side-label">Specialty ${helpIcon("specialty-modality")}</p>
             <input id="spec-search-input" class="side-input sm" type="text" placeholder="Search…" value="${escapeHtml(state.specSearch)}" data-action="spec-search-input" />
             <div class="side-checklist scrolly">
               ${filteredSpecs.map(s => `
@@ -713,16 +820,17 @@ function renderSidebar() {
         ${hasFilters ? `<button class="clear-all-btn" data-action="clear-all">Clear all filters</button>` : ""}
       </div>
       <div class="sidebar-foot">
-        ${sb && can("manageRoster") ? `<button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>` : ""}
-        ${sb && can("manageTeam") ? `<button class="admin-btn" data-action="team-open">👥 Manage team</button>` : ""}
-        ${sb && SHEET_SYNC.csvUrl && can("editStatus") ? `<button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>` : ""}
-        ${can("editStatus") ? `<button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>` : ""}
+        ${sb && can("manageRoster") ? `<div class="foot-row"><button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>${helpIcon("add-clinician")}</div>` : ""}
+        ${sb && can("manageTeam") ? `<div class="foot-row"><button class="admin-btn" data-action="team-open">👥 Manage team</button>${helpIcon("team-list")}</div>` : ""}
+        ${sb && SHEET_SYNC.csvUrl && can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>${helpIcon("sheet-sync")}</div>` : ""}
+        ${can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>${helpIcon("update-all")}</div>` : ""}
+        <button class="admin-btn help-btn" data-action="help-panel-open">? Help — how this app works</button>
         <div class="foot-utils">
           <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
           ${can("editStatus") ? `<button data-action="export-backup" title="Download the full roster as a JSON snapshot">⬇ Export</button>` : ""}
           ${!sb && can("editStatus") ? `<button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>` : ""}
         </div>
-        ${sb && state.role ? `<p class="role-line">Signed in${state.role !== "full" ? " · " + escapeHtml(ROLE_LABELS[state.role] || state.role) : ""}</p>` : ""}
+        ${sb && state.role ? `<p class="role-line">Signed in${state.role !== "full" ? " · " + escapeHtml(ROLE_LABELS[state.role] || state.role) : ""} ${helpIcon("your-role")}</p>` : ""}
         <button class="signout-btn" data-action="signout">Sign out</button>
       </div>
     </div>
@@ -845,7 +953,7 @@ function renderMainPane() {
     <div class="main-pane">
       <div class="main-bar">
         <div class="main-bar-left">
-          <span class="count-text"><strong>${filtered.length}</strong> clinician${filtered.length !== 1 ? "s" : ""}</span>
+          <span class="count-text"><strong>${filtered.length}</strong> clinician${filtered.length !== 1 ? "s" : ""}</span>${helpIcon("card-anatomy")}
           ${state.selectedSpecs.map(sp => `
             <span class="chip chip-spec">${escapeHtml(sp)}<button data-action="spec-toggle" data-spec="${escapeHtml(sp)}">×</button></span>
           `).join("")}
@@ -854,7 +962,7 @@ function renderMainPane() {
           `).join("")}
         </div>
         <div class="sort-wrap">
-          <label>Sort:</label>
+          <label>Sort: ${helpIcon("sort")}</label>
           <select data-action="sort-change">
             <option value="priority" ${state.sortBy === "priority" ? "selected" : ""}>Priority + Availability</option>
             <option value="name" ${state.sortBy === "name" ? "selected" : ""}>Name A–Z</option>
@@ -903,7 +1011,7 @@ function renderSpecsModal() {
             `).join("")}
           </div>
           <div class="modal-section">
-            <p class="label">Add a specialty not listed above</p>
+            <p class="label">Add a specialty not listed above ${helpIcon("add-specialty")}</p>
             <div class="modal-add-row">
               <input id="modal-spec-input" type="text" placeholder="Type and press Enter…" value="${escapeHtml(state.modalNewSpec)}" data-action="modal-spec-newinput" />
               <button data-action="modal-spec-add">Add</button>
@@ -1102,7 +1210,7 @@ function renderEditorModal() {
               <input id="ed-schedule" class="edit-input" type="text" value="${escapeHtml(d.schedule)}" data-action="editor-field" data-field="schedule" placeholder="Mon-Fri" />
             </div>
             <div class="ed-field ed-span">
-              <label>Offices *</label>
+              <label>Offices * ${helpIcon("editor-offices")}</label>
               <div class="ed-checks">
                 ${VALID_OFFICES.map(o => `
                   <label><input type="checkbox" ${check(d.offices, o)} data-action="editor-office" data-office="${o}" /> ${o}</label>
@@ -1111,7 +1219,7 @@ function renderEditorModal() {
               </div>
             </div>
             <div class="ed-field ed-span">
-              <label>Session groups * <span class="ed-hint">(what the Session type filters match on)</span></label>
+              <label>Session groups * <span class="ed-hint">(what the Session type filters match on)</span> ${helpIcon("editor-session-groups")}</label>
               <div class="ed-checks">
                 ${VALID_GROUPS.map(g => `
                   <label><input type="checkbox" ${check(d.groups, g)} data-action="editor-group" data-group="${g}" /> ${g}</label>
@@ -1119,7 +1227,7 @@ function renderEditorModal() {
               </div>
             </div>
             <div class="ed-field">
-              <label for="ed-indiv">Individual rate ($)</label>
+              <label for="ed-indiv">Individual rate ($) ${helpIcon("editor-rates")}</label>
               <input id="ed-indiv" class="edit-input" type="text" inputmode="decimal" value="${escapeHtml(d.indiv)}" data-action="editor-field" data-field="indiv" placeholder="185" />
             </div>
             <div class="ed-field">
@@ -1145,7 +1253,7 @@ function renderEditorModal() {
             <button class="btn-cancel" data-action="editor-cancel">Cancel</button>
           </div>
           ${!isNew ? `
-          <div class="editor-danger">
+          <div class="editor-danger">${helpIcon("deactivate-vs-delete")}
             ${existing && existing.active === false
               ? `<button class="btn-warn" data-action="editor-reactivate" data-id="${escapeHtml(state.editorId)}">Reactivate</button>`
               : `<button class="btn-warn" data-action="editor-deactivate" data-id="${escapeHtml(state.editorId)}" title="Hide from all staff — reversible">Deactivate</button>`}
@@ -1170,7 +1278,7 @@ function renderSheetReportModal() {
       <div class="modal">
         <div class="modal-head">
           <div>
-            <span class="title">⟳ Sheet sync report</span>
+            <span class="title">⟳ Sheet sync report ${helpIcon("sheet-report")}</span>
             <p class="sub">${escapeHtml(r.at.toLocaleString())}</p>
           </div>
           <button class="modal-close" data-action="sheet-report-close">&times;</button>
@@ -1216,7 +1324,7 @@ function renderTeamModal() {
         </div>
         <div class="modal-body">
           ${state.teamError ? `<div class="audit-item audit-error"><span>${escapeHtml(state.teamError)}</span></div>` : ""}
-          <p class="admin-section-label">Invite someone</p>
+          <p class="admin-section-label">Invite someone ${helpIcon("invite-role")}</p>
           <div class="team-invite">
             <input id="invite-email" class="edit-input" type="email" placeholder="name@mcnultycounseling.com" value="${escapeHtml(state.inviteEmail)}" data-action="invite-email-input" autocomplete="off" />
             <select data-action="invite-role-select">${roleOpts(state.inviteRole)}</select>
@@ -1304,7 +1412,7 @@ function render() {
   if (state.recoveryMode) {
     root.innerHTML = renderRecovery();
   } else if (!state.authed) {
-    root.innerHTML = renderLogin();
+    root.innerHTML = renderLogin() + renderHelpPopover();
   } else if (state.loading) {
     root.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#94a3b8;font-size:14px;">Loading…</div>`;
   } else if (state.loadError) {
@@ -1327,6 +1435,8 @@ function render() {
       ${renderEditorModal()}
       ${renderSheetReportModal()}
       ${renderTeamModal()}
+      ${renderHelpPanel()}
+      ${renderHelpPopover()}
     `;
   }
 
@@ -1343,6 +1453,8 @@ function render() {
   // restore scroll position
   if (scrollCards) { const a = document.querySelector(".cards-area"); if (a) a.scrollTop = scrollCards; }
   if (scrollSide) { const s = document.querySelector(".sidebar-body"); if (s) s.scrollTop = scrollSide; }
+  // anchor the help popover (no-op when none is open)
+  positionHelpPopover();
 }
 
 // ---------- actions ----------
@@ -1676,6 +1788,40 @@ function handleAction(action, el, ev) {
       return;
     }
 
+    // in-app help
+    case "help-open": {
+      const topic = el.dataset.topic;
+      if (state.help === topic) { state.help = null; state.helpAnchor = null; }
+      else { state.help = topic; state.helpAnchor = "help-anchor-" + topic; }
+      render();
+      if (state.help) { const p = document.getElementById("help-popover"); if (p) p.focus(); }
+      return;
+    }
+    case "help-close": {
+      const back = state.helpAnchor;
+      state.help = null;
+      state.helpAnchor = null;
+      render();
+      const a = back && document.getElementById(back);
+      if (a) a.focus();
+      return;
+    }
+    case "help-panel-open":
+      state.helpPanelOpen = true;
+      state.helpPanelSearch = "";
+      state.help = null;
+      state.helpAnchor = null;
+      render();
+      return;
+    case "help-panel-close":
+      state.helpPanelOpen = false;
+      render();
+      return;
+    case "help-panel-search":
+      state.helpPanelSearch = el.value;
+      render();
+      return;
+
     // clinician editor (add / edit details / deactivate / delete)
     case "editor-open": {
       if (!sb) { alert("Adding and editing clinicians requires the shared database (currently in local fallback mode)."); return; }
@@ -2000,6 +2146,18 @@ function findActionEl(target) {
 
 document.addEventListener("click", (ev) => {
   const el = findActionEl(ev.target);
+  // Click anywhere outside an open help popover dismisses it. Must run BEFORE
+  // the `if (!el) return` below, or clicks on plain areas would never close it.
+  if (state.help) {
+    const inPopover = ev.target.closest && ev.target.closest("#help-popover");
+    const isHelpBtn = el && el.dataset.action && el.dataset.action.indexOf("help-") === 0;
+    if (!inPopover && !isHelpBtn) {
+      state.help = null;
+      state.helpAnchor = null;
+      render();
+      // fall through so the click still does whatever it was going to do
+    }
+  }
   if (!el) return;
   const action = el.dataset.action;
   // skip click handling for inputs that have their own handlers
@@ -2043,13 +2201,31 @@ document.addEventListener("submit", (ev) => {
 // Escape-to-close for any open modal
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
-  if (state.editorId) { closeEditor(); render(); }
+  // help closes first so Esc inside a modal dismisses the popover, not the modal
+  if (state.help) { const a = state.helpAnchor; state.help = null; state.helpAnchor = null; render(); const b = a && document.getElementById(a); if (b) b.focus(); }
+  else if (state.helpPanelOpen) { state.helpPanelOpen = false; render(); }
+  else if (state.editorId) { closeEditor(); render(); }
   else if (state.teamOpen) { state.teamOpen = false; render(); }
   else if (state.sheetReportOpen) { state.sheetReportOpen = false; render(); }
   else if (state.healthOpen) { state.healthOpen = false; render(); }
   else if (state.adminOpen) { state.adminOpen = false; state.adminEdits = null; state.adminOriginal = null; render(); }
   else if (state.specsModalId) { state.specsModalId = null; state.modalSpecs = null; state.modalNewSpec = ""; render(); }
   else if (state.modsModalId) { state.modsModalId = null; state.modalMods = null; state.modalNewMod = ""; render(); }
+});
+
+// Keep the help popover glued to its ⓘ while scrolling/resizing.
+// Capture phase: scrolls inside .sidebar-body / .cards-area don't bubble.
+window.addEventListener("resize", () => positionHelpPopover());
+window.addEventListener("scroll", () => positionHelpPopover(), { passive: true, capture: true });
+
+// "?" opens the Help panel (ignored while typing in a field)
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "?" || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+  if (!state.authed || state.recoveryMode) return;
+  ev.preventDefault();
+  handleAction("help-panel-open", document.body, ev);
 });
 
 // Enter-to-add for modal text inputs

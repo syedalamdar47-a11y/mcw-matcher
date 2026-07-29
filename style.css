@@ -244,3 +244,51 @@ textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; 
   .editor-grid { grid-template-columns: 1fr; }
   .ed-virtual { border-left: none; padding-left: 0; }
 }
+
+/* ===== In-app help (ⓘ popovers + Help panel) ===== */
+.help-i { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+  border-radius: 50%; border: 1px solid currentColor; background: none; color: inherit; opacity: .55;
+  font-size: 10px; font-weight: 700; font-family: Georgia, serif; font-style: italic; line-height: 1;
+  cursor: pointer; padding: 0; vertical-align: middle; flex-shrink: 0; }
+.help-i:hover, .help-i:focus-visible { opacity: 1; }
+.help-i.active { opacity: 1; background: #2d7a35; border-color: #2d7a35; color: #fff; }
+.help-i:focus-visible { outline: 2px solid #2d7a35; outline-offset: 2px; }
+.sidebar .help-i:focus-visible, .role-line .help-i:focus-visible { outline-color: #86c787; }
+.side-search-wrap { display: flex; align-items: center; gap: 6px; }
+.side-search-wrap .side-input { flex: 1; }
+.side-search-wrap .help-i { color: #cbd5e1; }
+.foot-row { display: flex; align-items: center; gap: 6px; }
+.foot-row .admin-btn { flex: 1; margin: 0; }
+.foot-row .help-i { color: #cbd5e1; }
+.help-btn { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); font-size: 11.5px; }
+.help-btn:hover { background: rgba(255,255,255,0.16); }
+
+.help-backdrop { display: none; }
+.help-popover { position: fixed; z-index: 80; width: 300px; max-width: calc(100vw - 16px);
+  background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.18);
+  padding: 12px 14px 14px; }
+.help-popover:focus { outline: none; }
+.help-pop-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.help-pop-title { font-size: 13px; font-weight: 700; color: #1e4d2b; }
+.help-pop-close { background: none; border: none; font-size: 18px; line-height: 1; color: #94a3b8; cursor: pointer; padding: 0 2px; }
+.help-pop-close:hover { color: #0f172a; }
+.help-popover p { font-size: 12.5px; line-height: 1.5; color: #334155; margin: 0 0 7px; }
+.help-popover p:last-child { margin-bottom: 0; }
+.help-tip { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 7px; padding: 7px 9px; }
+.help-role { color: #64748b; font-style: italic; }
+
+.help-item { border-bottom: 1px solid #f1f5f9; padding: 10px 0; }
+.help-item:last-child { border-bottom: none; }
+.help-item-title { font-size: 13px; font-weight: 700; color: #1e4d2b; margin: 0 0 4px; }
+.help-item p { font-size: 12.5px; line-height: 1.5; color: #334155; margin: 0 0 6px; }
+.help-empty { font-size: 13px; color: #64748b; padding: 16px 0; text-align: center; }
+#help-panel-search { margin-bottom: 6px; }
+
+@media (max-width: 768px) {
+  .help-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 79; }
+  .help-popover { top: auto !important; left: 0 !important; right: 0; bottom: 0; width: auto; max-width: none;
+    border-radius: 16px 16px 0 0; max-height: 60vh; overflow-y: auto;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .help-popover p { font-size: 14px; }
+  .help-i { width: 22px; height: 22px; font-size: 12px; }
+}
