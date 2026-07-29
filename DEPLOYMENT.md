@@ -15,7 +15,18 @@ This document explains how the MCW Client Matcher is deployed and how to push ch
 ## Project overview
 
 - **Type**: Static website (vanilla HTML + CSS + JS, no framework, no build step)
-- **Live URL**: https://mcw-clinician-matcher.netlify.app
+- **Live URL (primary)**: https://matcher.mcnultycounseling.com — also reachable at https://mcw-clinician-matcher.netlify.app
+
+> ⚠️ **This overview section predates the Supabase shared backend.** The
+> "Password is client-side" (#3) and "Data is per-browser / no shared backend"
+> (#4) constraints below describe the ORIGINAL localStorage-only architecture and
+> are **superseded** for the live deployment. Production now runs in **shared
+> mode** (Supabase Auth + Postgres + roles + sheet sync) — see the "Shared backend
+> (Supabase)" and "Roles & permissions" sections lower in this file, which are
+> authoritative. The localStorage path only activates as an emergency fallback if
+> `SUPABASE_URL` in `data.js` is blanked. Deployed app assets: index.html,
+> style.css, data.js, script.js, audit.js, supabase.min.js, logo.png, _headers,
+> _redirects, 404.html.
 - **GitHub repo**: https://github.com/syedalamdar47-a11y/mcw-matcher
 - **Host**: Netlify (free tier)
 - **Deploy branch**: `main`

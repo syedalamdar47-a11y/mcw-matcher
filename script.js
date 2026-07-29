@@ -83,10 +83,17 @@ async function loadRole() {
     const uid = u && u.user && u.user.id;
     if (!uid) { state.role = "viewer"; return; }
     const { data, error } = await sb.from("user_roles").select("role").eq("user_id", uid).maybeSingle();
-    if (error) { state.role = "full"; return; }      // table missing = pre-permissions
+    if (error) {
+      // ONLY the "roles table not created yet" case falls back to full access
+      // (pre-permissions bootstrap). Every other error fails CLOSED to viewer,
+      // so a transient hiccup can never silently promote someone to owner.
+      const tableMissing = /user_roles|does not exist|PGRST205|schema cache/i.test(error.message || "");
+      state.role = tableMissing ? "full" : "viewer";
+      return;
+    }
     state.role = (data && data.role) || "viewer";    // table exists but no row = least privilege
   } catch {
-    state.role = "full";
+    state.role = "viewer";                            // fail closed
   }
 }
 
@@ -143,22 +150,21 @@ async function loadClinicians() {
   state.loading = false;
 }
 
-// Saves the editable fields. In shared mode, writes ONLY the changed rows to the
-// database (pass the changed id(s)); writing unchanged rows would clobber a
-// colleague's concurrent edits with stale values.
-function persist(changedIds) {
+// Saves the editable fields. In shared mode, writes ONLY the changed rows, and
+// ONLY the fields the calling editor owns (pass fieldKeys) — so two staff editing
+// different aspects of the same clinician never clobber each other, even if the
+// realtime channel is momentarily down. Defaults to all five mutable fields.
+const MUTABLE_FIELDS = ["accepting", "priority", "notes", "specialties", "modalities"];
+function persist(changedIds, fieldKeys) {
+  const keys = (fieldKeys && fieldKeys.length) ? fieldKeys : MUTABLE_FIELDS;
   if (sb) {
     const ids = changedIds || state.clinicians.map(c => c.id);
     const rows = state.clinicians.filter(c => ids.includes(c.id));
-    Promise.all(rows.map(c =>
-      sb.from("clinicians").update({
-        accepting: c.accepting,
-        priority: c.priority,
-        notes: c.notes,
-        specialties: c.specialties,
-        modalities: c.modalities,
-      }).eq("id", c.id).select("id")
-    )).then(results => {
+    Promise.all(rows.map(c => {
+      const patch = {};
+      keys.forEach(k => { patch[k] = c[k]; });
+      return sb.from("clinicians").update(patch).eq("id", c.id).select("id");
+    })).then(results => {
       // .select("id") makes a remotely-deleted row detectable (0 rows updated)
       const failures = results.filter(r => !r || r.error || !r.data || r.data.length === 0);
       if (failures.length) {
@@ -398,20 +404,27 @@ async function syncFromSheet(openReport) {
 // The audit rules live in audit.js (shared with CI / the nightly cloud audit).
 // runAudit / auditSheet / parseCsv / the alias maps are globals from there.
 
-// ---------- backup / restore ----------
-// Exports the same field set persist() writes, so import round-trips exactly.
+// ---------- export ----------
+// In shared mode this downloads the COMPLETE roster (every field) as a
+// point-in-time snapshot — a real backup you can archive. In local mode it
+// keeps the round-trippable 5-field map that importBackup can restore.
 function exportBackup() {
-  const map = {};
-  state.clinicians.forEach(c => {
-    map[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes, specialties: c.specialties, modalities: c.modalities };
-  });
-  const blob = new Blob([JSON.stringify(map, null, 2)], { type: "application/json" });
+  let payload;
+  if (sb) {
+    payload = state.clinicians.map(c => ({ ...c })); // full roster snapshot
+  } else {
+    payload = {};
+    state.clinicians.forEach(c => {
+      payload[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes, specialties: c.specialties, modalities: c.modalities };
+    });
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const d = new Date();
   const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
   const a = document.createElement("a");
   a.href = url;
-  a.download = `mcw-matcher-backup-${stamp}.json`;
+  a.download = `mcw-roster-export-${stamp}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -452,7 +465,12 @@ function getFiltered() {
   let res = state.clinicians.filter(c => c.type === state.typeFilter && c.active !== false);
   if (state.search.trim()) {
     const q = state.search.toLowerCase();
-    res = res.filter(c => (c.name || "").toLowerCase().includes(q) || (c.profile || "").toLowerCase().includes(q));
+    // Match across the fields staff actually search on during intake — name,
+    // credentials, specialties, modalities, session groups, and notes.
+    res = res.filter(c => [
+      c.name, c.profile, c.notes,
+      ...(c.specialties || []), ...(c.modalities || []), ...(c.groups || []), ...(c.offices || []),
+    ].some(v => String(v || "").toLowerCase().includes(q)));
   }
   if (state.offices.length) {
     res = res.filter(c => state.offices.some(o => c.offices.includes(o)));
@@ -628,7 +646,7 @@ function renderSidebar() {
         <p class="sidebar-sub">Clinician Matcher</p>
       </div>
       <div class="sidebar-body">
-        <input id="search-input" class="side-input" type="text" placeholder="Search by name…" value="${escapeHtml(state.search)}" data-action="search-input" />
+        <input id="search-input" class="side-input" type="text" placeholder="Search name, specialty, modality…" value="${escapeHtml(state.search)}" data-action="search-input" />
 
         <div>
           <p class="side-label">Provider type</p>
@@ -701,10 +719,10 @@ function renderSidebar() {
         ${can("editStatus") ? `<button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>` : ""}
         <div class="foot-utils">
           <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
-          ${can("editStatus") ? `<button data-action="export-backup" title="Download a backup of all edits">⬇ Backup</button>` : ""}
+          ${can("editStatus") ? `<button data-action="export-backup" title="Download the full roster as a JSON snapshot">⬇ Export</button>` : ""}
           ${!sb && can("editStatus") ? `<button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>` : ""}
         </div>
-        ${sb && state.role ? `<p class="role-line">Signed in · ${escapeHtml(ROLE_LABELS[state.role] || state.role)}</p>` : ""}
+        ${sb && state.role ? `<p class="role-line">Signed in${state.role !== "full" ? " · " + escapeHtml(ROLE_LABELS[state.role] || state.role) : ""}</p>` : ""}
         <button class="signout-btn" data-action="signout">Sign out</button>
       </div>
     </div>
@@ -802,7 +820,7 @@ function renderCard(c) {
           </div>
           <div class="edit-input-wrap">
             <label>Admin note</label>
-            <input id="card-edit-notes-${escapeHtml(c.id)}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="card-edit-notes" />
+            <textarea id="card-edit-notes-${escapeHtml(c.id)}" class="edit-input" rows="2" data-action="card-edit-notes">${escapeHtml(ed.notes || "")}</textarea>
           </div>
           <div class="edit-actions">
             <button class="btn-save" data-action="card-edit-save" data-id="${escapeHtml(c.id)}">Save</button>
@@ -810,12 +828,11 @@ function renderCard(c) {
           </div>
         </div>
       ` : `
-        ${can("editStatus") || can("manageRoster") ? `
         <div class="card-foot">
+          <button data-action="copy-clinician" data-id="${escapeHtml(c.id)}" title="Copy this clinician's details to paste elsewhere">⧉ Copy</button>
           ${can("editStatus") ? `<button data-action="card-edit-start" data-id="${escapeHtml(c.id)}">Edit status &amp; priority</button>` : ""}
           ${sb && can("manageRoster") ? `<button data-action="editor-open" data-id="${escapeHtml(c.id)}">Edit details</button>` : ""}
         </div>
-        ` : ""}
       `}
     </div>
   `;
@@ -979,7 +996,7 @@ function renderAdminModal() {
         </div>
         <div class="edit-input-wrap">
           <label>Admin notes</label>
-          <input id="admin-notes-${escapeHtml(c.id)}" class="edit-input" type="text" value="${escapeHtml(ed.notes || "")}" data-action="admin-notes" data-id="${escapeHtml(c.id)}" />
+          <textarea id="admin-notes-${escapeHtml(c.id)}" class="edit-input" rows="2" data-action="admin-notes" data-id="${escapeHtml(c.id)}">${escapeHtml(ed.notes || "")}</textarea>
         </div>
       </div>
     `;
@@ -1278,6 +1295,10 @@ function render() {
   const activeId = active && active.id;
   const selStart = active && "selectionStart" in active ? active.selectionStart : null;
   const selEnd = active && "selectionEnd" in active ? active.selectionEnd : null;
+  // preserve scroll position of the scrolling regions so filtering/typing doesn't
+  // yank the roster back to the top on every keystroke.
+  const scrollCards = (document.querySelector(".cards-area") || {}).scrollTop || 0;
+  const scrollSide = (document.querySelector(".sidebar-body") || {}).scrollTop || 0;
 
   const root = document.getElementById("app");
   if (state.recoveryMode) {
@@ -1319,6 +1340,9 @@ function render() {
       }
     }
   }
+  // restore scroll position
+  if (scrollCards) { const a = document.querySelector(".cards-area"); if (a) a.scrollTop = scrollCards; }
+  if (scrollSide) { const s = document.querySelector(".sidebar-body"); if (s) s.scrollTop = scrollSide; }
 }
 
 // ---------- actions ----------
@@ -1491,7 +1515,11 @@ function handleAction(action, el, ev) {
     case "search-input":
       state.search = el.value; render(); return;
     case "type-set":
-      state.typeFilter = el.dataset.type; render(); return;
+      state.typeFilter = el.dataset.type;
+      // Specialty/Modality filters only apply to therapy; clear them when
+      // switching to Psychiatry so results don't silently collapse to zero.
+      if (state.typeFilter !== "therapy") { state.selectedSpecs = []; state.selectedMods = []; }
+      render(); return;
     case "office-toggle":
       state.offices = toggleArr(state.offices, el.dataset.office); render(); return;
     case "session-toggle":
@@ -1525,6 +1553,30 @@ function handleAction(action, el, ev) {
       render();
       return;
     }
+    case "copy-clinician": {
+      const c = state.clinicians.find(x => x.id === el.dataset.id);
+      if (!c) return;
+      const indiv = c.indivDisplay ? c.indivDisplay : (c.indiv != null ? "$" + c.indiv : "");
+      const rates = [indiv && "Indiv " + indiv, c.couples != null && "Couples $" + c.couples, c.family != null && "Family $" + c.family].filter(Boolean).join(" · ");
+      const text = [
+        c.profile || c.name,
+        `${c.type === "psychiatry" ? "Psychiatry" : "Therapy"} · ${(c.offices || []).join(", ")}${c.virtual ? " (+ virtual)" : ""}`,
+        `Availability: ${c.accepting} · Priority: ${c.priority}`,
+        c.schedule && `Schedule: ${c.schedule}`,
+        rates && `Rates: ${rates}`,
+        (c.groups || []).length && `Sessions: ${c.groups.join(", ")}`,
+        (c.specialties || []).length && `Specialties: ${c.specialties.join(", ")}`,
+        (c.modalities || []).length && `Modalities: ${c.modalities.join(", ")}`,
+        c.notes && `Note: ${c.notes}`,
+      ].filter(Boolean).join("\n");
+      const flash = () => { const orig = el.innerHTML; el.innerHTML = "✓ Copied"; setTimeout(() => { el.innerHTML = orig; }, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(flash, () => prompt("Copy this clinician's details:", text));
+      } else {
+        prompt("Copy this clinician's details:", text);
+      }
+      return;
+    }
     case "card-edit-accepting":
       state.cardEdit.accepting = el.value; return; // no re-render
     case "card-edit-priority":
@@ -1534,7 +1586,7 @@ function handleAction(action, el, ev) {
     case "card-edit-save": {
       const id = el.dataset.id;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, ...state.cardEdit } : c);
-      persist([id]);
+      persist([id], ["accepting", "priority", "notes"]);
       state.editingCardId = null;
       state.cardEdit = null;
       render();
@@ -1578,7 +1630,7 @@ function handleAction(action, el, ev) {
     case "modal-spec-save": {
       const id = state.specsModalId;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, specialties: state.modalSpecs.slice() } : c);
-      persist([id]);
+      persist([id], ["specialties"]);
       state.specsModalId = null;
       state.modalSpecs = null;
       render();
@@ -1617,7 +1669,7 @@ function handleAction(action, el, ev) {
     case "modal-mod-save": {
       const id = state.modsModalId;
       state.clinicians = state.clinicians.map(c => c.id === id ? { ...c, modalities: state.modalMods.slice() } : c);
-      persist([id]);
+      persist([id], ["modalities"]);
       state.modsModalId = null;
       state.modalMods = null;
       render();
@@ -1926,7 +1978,7 @@ function handleAction(action, el, ev) {
       state.clinicians = state.clinicians.map(c => {
         return changed.includes(c.id) ? { ...c, ...state.adminEdits[c.id] } : c;
       });
-      if (changed.length) persist(changed);
+      if (changed.length) persist(changed, ["accepting", "priority", "notes"]);
       state.adminOpen = false;
       state.adminEdits = null;
       state.adminOriginal = null;
@@ -1952,6 +2004,7 @@ document.addEventListener("click", (ev) => {
   const action = el.dataset.action;
   // skip click handling for inputs that have their own handlers
   if (el.tagName === "INPUT" && (el.type === "text" || el.type === "password" || el.type === "email")) return;
+  if (el.tagName === "TEXTAREA") return;
   if (el.tagName === "SELECT") return;
   // checkboxes are handled by change
   if (el.tagName === "INPUT" && el.type === "checkbox") return;
@@ -1963,6 +2016,7 @@ document.addEventListener("click", (ev) => {
 document.addEventListener("input", (ev) => {
   const el = findActionEl(ev.target);
   if (!el) return;
+  if (el.tagName === "TEXTAREA") { handleAction(el.dataset.action, el, ev); return; }
   if (el.tagName !== "INPUT") return;
   if (el.type !== "text" && el.type !== "password" && el.type !== "email") return;
   handleAction(el.dataset.action, el, ev);

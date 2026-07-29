@@ -113,6 +113,7 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background:
 .edit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
 .edit-grid label { font-size: 11px; color: #64748b; display: block; margin-bottom: 3px; }
 .edit-grid select, .edit-input { width: 100%; font-size: 12px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 5px 8px; background: #fff; outline: none; }
+textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; line-height: 1.4; }
 .edit-input-wrap { margin-bottom: 8px; }
 .edit-input-wrap label { font-size: 11px; color: #64748b; display: block; margin-bottom: 3px; }
 .edit-actions { display: flex; gap: 8px; }

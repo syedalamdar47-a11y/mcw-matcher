@@ -1,0 +1,13 @@
+# Block public access to internal files that Netlify would otherwise serve from
+# the repo root. These contain schema/RLS, SOPs, the owner email, and the local-
+# mode password — recon material, not app assets. The app itself never loads them.
+/roles-setup.sql                  /404.html  404!
+/supabase-setup.sql               /404.html  404!
+/phase2-upgrade.sql               /404.html  404!
+/sheet-template.csv               /404.html  404!
+/DEPLOYMENT.md                    /404.html  404!
+/USER-GUIDE.md                    /404.html  404!
+/SOP-GENERATION-MASTER-PROMPT.md  /404.html  404!
+/supabase/*                       /404.html  404!
+/sop-kit/*                        /404.html  404!
+/scripts/*                        /404.html  404!
