@@ -20,10 +20,10 @@ body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background:
 
 /* Sidebar */
 .sidebar { width: 220px; flex-shrink: 0; background: #1e4d2b; display: flex; flex-direction: column; overflow: hidden; }
-.sidebar-head { padding: 14px; border-bottom: 1px solid rgba(255,255,255,0.08); background: #fff; }
-.sidebar-logo { max-width: 100%; width: 100%; height: auto; display: block; margin: 0 auto 4px; }
+.sidebar-head { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); background: #fff; display: flex; align-items: center; gap: 9px; }
+.sidebar-logo { width: 112px; max-width: 112px; height: auto; display: block; margin: 0; flex-shrink: 0; }
 .sidebar-title { color: #1e4d2b; font-weight: 700; font-size: 12px; margin: 0 0 2px; text-align: center; }
-.sidebar-sub { color: #2d7a35; font-size: 14px; margin: 0; text-align: center; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.sidebar-sub { color: #2d7a35; font-size: 10px; line-height: 1.25; margin: 0; text-align: left; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
 .sidebar-body { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 14px; }
 .sidebar-foot { padding: 10px 14px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 6px; }
 .side-label { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #86c787; margin: 0 0 6px; }
@@ -319,3 +319,20 @@ textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; 
 .diff-none { font-size: 11.5px; color: #94a3b8; font-style: italic; }
 .review-note { font-size: 12.5px; color: #475569; background: #f8fafc; border-radius: 6px; padding: 8px 10px; margin: 10px 0 0; }
 .review-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+/* ===== Sidebar space reclaim + ⚙ Admin & tools ===== */
+.side-checklist.cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 8px; }
+.side-checklist.cols2 .check-row span { font-size: 11.5px; }
+.tools-btn { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.tools-badge { background: #f43f5e; color: #fff; font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px; }
+.foot-utils button { flex: 1; }
+
+.tool-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.tool-item { flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  text-align: left; background: #fff; border: 1px solid #e2e8f0; border-radius: 9px;
+  padding: 10px 12px; font-size: 13px; color: #0f172a; cursor: pointer; }
+.tool-item:hover { background: #f0fdf4; border-color: #bbf7d0; }
+.tool-item:disabled { opacity: .55; cursor: default; }
+.tool-extra { font-size: 11px; font-weight: 700; color: #b91c1c; background: #fef2f2;
+  border: 1px solid #fecaca; border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+.tool-who { font-size: 12.5px; color: #475569; margin: 0; }

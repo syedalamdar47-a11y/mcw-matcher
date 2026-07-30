@@ -61,6 +61,9 @@ const state = {
   myPending: null,       // their outstanding change request, if any
   mySubmitBusy: false,
   mySubmitMsg: "",
+  toolsOpen: false,      // ⚙ Admin & tools modal (keeps the sidebar for filters)
+  userEmail: "",
+  pendingCount: 0,
   reviewOpen: false,     // admin review queue
   reviewRows: null,
   reviewBusy: false,
@@ -199,6 +202,7 @@ async function loadRole() {
   try {
     const { data: u } = await sb.auth.getUser();
     const uid = u && u.user && u.user.id;
+    state.userEmail = (u && u.user && u.user.email) || "";
     if (!uid) { state.role = "viewer"; return; }
     // Try the portal-aware shape first; fall back if the migration hasn't run.
     let { data, error } = await sb.from("user_roles").select("role,clinician_id").eq("user_id", uid).maybeSingle();
@@ -616,7 +620,8 @@ function getFiltered() {
     ].some(v => String(v || "").toLowerCase().includes(q)));
   }
   if (state.offices.length) {
-    res = res.filter(c => state.offices.some(o => c.offices.includes(o)));
+    res = res.filter(c => state.offices.some(o =>
+      o === "Virtual" ? (c.virtual || (c.offices || []).includes("Virtual")) : (c.offices || []).includes(o)));
   }
   if (state.sessionTypes.length) {
     // Map the sidebar labels to the plural group names used in the data,
@@ -846,6 +851,58 @@ function renderMyProfile() {
     </div>`;
 }
 
+// Every occasional/admin action lives here instead of permanently occupying the
+// sidebar, which belongs to the filters the front desk uses on every call.
+function renderToolsModal() {
+  if (!state.toolsOpen) return "";
+  const row = (action, label, topic, attrs, extra) => `
+    <div class="tool-row">
+      <button class="tool-item" data-action="${action}" ${attrs || ""}>
+        <span class="tool-label">${label}</span>
+        ${extra ? `<span class="tool-extra">${extra}</span>` : ""}
+      </button>
+      ${topic ? helpIcon(topic) : ""}
+    </div>`;
+  const roster = [
+    sb && can("manageRoster") ? row("editor-open", "+ Add clinician", "add-clinician", 'data-id="__new__"') : "",
+    can("editStatus") ? row("admin-open", "⚙ Update all clinicians", "update-all") : "",
+    sb && SHEET_SYNC.csvUrl && can("editStatus")
+      ? row("sheet-sync", state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet", "sheet-sync", state.sheetSyncBusy ? "disabled" : "") : "",
+  ].filter(Boolean).join("");
+  const team = [
+    sb && can("manageTeam") ? row("team-open", "👥 Manage team", "team-list") : "",
+    sb && can("reviewChanges")
+      ? row("review-open", "📝 Clinician change requests", "", "", state.pendingCount ? `${state.pendingCount} waiting` : "") : "",
+  ].filter(Boolean).join("");
+  const tools = [
+    can("editStatus") ? row("health-open", "🩺 Health check", "health") : "",
+    can("editStatus") ? row("export-backup", "⬇ Export a snapshot", "export") : "",
+    !sb && can("editStatus") ? row("import-backup", "⬆ Restore from a file", "") : "",
+  ].filter(Boolean).join("");
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">⚙ Admin &amp; tools</span>
+            <p class="sub">Everything that isn't day-to-day matching.</p>
+          </div>
+          <button class="modal-close" data-action="tools-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${roster ? `<p class="admin-section-label">Clinicians</p>${roster}` : ""}
+          ${team ? `<p class="admin-section-label spaced">Team</p>${team}` : ""}
+          ${tools ? `<p class="admin-section-label spaced">Tools</p>${tools}` : ""}
+          <p class="admin-section-label spaced">Account</p>
+          <p class="tool-who">${escapeHtml(state.userEmail || "Signed in")}${state.role && state.role !== "full" ? " · " + escapeHtml(ROLE_LABELS[state.role] || state.role) : ""} ${helpIcon("your-role")}</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="tools-close">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 function renderReviewModal() {
   if (!state.reviewOpen) return "";
   const rows = state.reviewRows || [];
@@ -923,8 +980,9 @@ function renderSidebar() {
 
         <div>
           <p class="side-label">Office</p>
-          <div class="side-checklist">
-            ${["DTSP","Tyrone","Tampa","Sarasota"].map(o => `
+          <div class="side-checklist cols2">
+            ${(() => { const BASE=["DTSP","Tyrone","Tampa","Sarasota","Virtual"];
+              return BASE.concat(uniqueSorted(state.clinicians.flatMap(c => c.offices || [])).filter(o => !BASE.includes(o))); })().map(o => `
               <label class="check-row">
                 <input type="checkbox" data-action="office-toggle" data-office="${o}" ${state.offices.includes(o) ? "checked" : ""} />
                 <span>${o}</span>
@@ -935,7 +993,7 @@ function renderSidebar() {
 
         <div>
           <p class="side-label">Session type ${helpIcon("session-type")}</p>
-          <div class="side-checklist">
+          <div class="side-checklist cols2">
             ${["Individual","Couples","Family","Minors"].map(st => `
               <label class="check-row">
                 <input type="checkbox" data-action="session-toggle" data-session="${st}" ${state.sessionTypes.includes(st) ? "checked" : ""} />
@@ -978,19 +1036,13 @@ function renderSidebar() {
         ${hasFilters ? `<button class="clear-all-btn" data-action="clear-all">Clear all filters</button>` : ""}
       </div>
       <div class="sidebar-foot">
-        ${sb && can("manageRoster") ? `<div class="foot-row"><button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>${helpIcon("add-clinician")}</div>` : ""}
-        ${sb && can("manageTeam") ? `<div class="foot-row"><button class="admin-btn" data-action="team-open">👥 Manage team</button>${helpIcon("team-list")}</div>` : ""}
-        ${sb && can("reviewChanges") ? `<button class="admin-btn" data-action="review-open">📝 Clinician change requests</button>` : ""}
-        ${sb && SHEET_SYNC.csvUrl && can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>${helpIcon("sheet-sync")}</div>` : ""}
-        ${can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>${helpIcon("update-all")}</div>` : ""}
-        <button class="admin-btn help-btn" data-action="help-panel-open">? Help — how this app works</button>
+        ${can("editStatus") || can("manageTeam") || can("manageRoster")
+          ? `<button class="admin-btn tools-btn" id="tools-btn" data-action="tools-open" aria-haspopup="dialog">⚙ Admin &amp; tools${state.pendingCount ? `<span class="tools-badge">${state.pendingCount}</span>` : ""}</button>`
+          : ""}
         <div class="foot-utils">
-          <button data-action="health-open" title="Run automated data checks">🩺 Health</button>
-          ${can("editStatus") ? `<button data-action="export-backup" title="Download the full roster as a JSON snapshot">⬇ Export</button>` : ""}
-          ${!sb && can("editStatus") ? `<button data-action="import-backup" title="Restore edits from a backup file">⬆ Restore</button>` : ""}
+          <button data-action="help-panel-open" title="How this app works (press ?)">? Help</button>
+          <button data-action="signout" title="Sign out of the Matcher">Sign out</button>
         </div>
-        ${sb && state.role ? `<p class="role-line">Signed in${state.role !== "full" ? " · " + escapeHtml(ROLE_LABELS[state.role] || state.role) : ""} ${helpIcon("your-role")}</p>` : ""}
-        <button class="signout-btn" data-action="signout">Sign out</button>
       </div>
     </div>
   `;
@@ -1596,6 +1648,7 @@ function render() {
       ${renderEditorModal()}
       ${renderSheetReportModal()}
       ${renderTeamModal()}
+      ${renderToolsModal()}
       ${renderReviewModal()}
       ${renderHelpPanel()}
       ${renderHelpPopover()}
@@ -1993,8 +2046,13 @@ function handleAction(action, el, ev) {
       return;
     }
 
+    // ⚙ Admin & tools
+    case "tools-open": state.toolsOpen = true; render(); return;
+    case "tools-close": state.toolsOpen = false; render(); return;
+
     // admin review queue
     case "review-open":
+      state.toolsOpen = false;
       state.reviewOpen = true; state.reviewBusy = true; render();
       sb.from("pending_change_review").select("*").order("submitted_at").then(({ data, error }) => {
         state.reviewBusy = false;
@@ -2069,6 +2127,7 @@ function handleAction(action, el, ev) {
 
     // clinician editor (add / edit details / deactivate / delete)
     case "editor-open": {
+      state.toolsOpen = false;
       if (!sb) { alert("Adding and editing clinicians requires the shared database (currently in local fallback mode)."); return; }
       const id = el.dataset.id;
       if (id === "__new__") {
@@ -2142,6 +2201,7 @@ function handleAction(action, el, ev) {
 
     // team / roles management
     case "team-open": {
+      state.toolsOpen = false;
       if (!can("manageTeam")) return;
       state.teamOpen = true;
       state.teamBusy = true;
@@ -2307,6 +2367,7 @@ function handleAction(action, el, ev) {
 
     // Google Sheet sync
     case "sheet-sync":
+      state.toolsOpen = false;
       syncFromSheet(true);
       return;
     case "sheet-report-close":
@@ -2316,6 +2377,7 @@ function handleAction(action, el, ev) {
 
     // health check + backup
     case "health-open":
+      state.toolsOpen = false;
       state.healthResults = runAudit(state.clinicians, { checkLocalStorage: !sb });
       state.healthOpen = true;
       render();
@@ -2325,14 +2387,17 @@ function handleAction(action, el, ev) {
       render();
       return;
     case "export-backup":
+      state.toolsOpen = false;
       exportBackup();
       return;
     case "import-backup":
+      state.toolsOpen = false;
       importBackup();
       return;
 
     // admin panel
     case "admin-open": {
+      state.toolsOpen = false;
       state.adminEdits = {};
       state.adminOriginal = {};
       state.clinicians.forEach(c => {
@@ -2449,6 +2514,7 @@ document.addEventListener("keydown", (ev) => {
   // help closes first so Esc inside a modal dismisses the popover, not the modal
   if (state.help) { const a = state.helpAnchor; state.help = null; state.helpAnchor = null; render(); const b = a && document.getElementById(a); if (b) b.focus(); }
   else if (state.helpPanelOpen) { state.helpPanelOpen = false; render(); }
+  else if (state.toolsOpen) { state.toolsOpen = false; render(); }
   else if (state.editorId) { closeEditor(); render(); }
   else if (state.teamOpen) { state.teamOpen = false; render(); }
   else if (state.sheetReportOpen) { state.sheetReportOpen = false; render(); }
