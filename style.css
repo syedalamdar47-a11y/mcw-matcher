@@ -292,3 +292,30 @@ textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; 
   .help-popover p { font-size: 14px; }
   .help-i { width: 22px; height: 22px; font-size: 12px; }
 }
+
+/* ===== Clinician self-service portal ===== */
+.portal-wrap { min-height: 100vh; background: #1e4d2b; padding: 24px 16px; display: flex; justify-content: center; align-items: flex-start; }
+.portal-card { background: #fff; border-radius: 16px; width: 100%; max-width: 760px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+.portal-head { display: flex; align-items: center; gap: 14px; padding: 18px 22px; border-bottom: 1px solid #e2e8f0; flex-wrap: wrap; }
+.portal-logo { max-width: 120px; height: auto; }
+.portal-name { font-size: 16px; font-weight: 700; color: #1e4d2b; margin: 0; }
+.portal-sub { font-size: 12.5px; color: #64748b; margin: 2px 0 0; }
+.portal-signout { width: auto !important; margin-left: auto; color: #64748b; border-color: #e2e8f0; }
+.portal-body { padding: 20px 22px; }
+.portal-intro { font-size: 13px; color: #475569; line-height: 1.6; margin: 0 0 16px; }
+.portal-pending { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 11px 13px; font-size: 13px; line-height: 1.5; margin-bottom: 16px; }
+.portal-foot { display: flex; gap: 10px; padding: 16px 22px; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+.portal-foot .btn-save { flex: 1; }
+@media (max-width: 768px) { .portal-wrap { padding: 0; } .portal-card { border-radius: 0; min-height: 100vh; } }
+
+/* Admin review queue */
+.review-row { border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+.review-who { font-size: 13.5px; font-weight: 700; color: #0f172a; margin: 0; }
+.review-when { font-size: 11.5px; color: #94a3b8; margin: 2px 0 10px; }
+.review-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #64748b; margin: 8px 0 4px; }
+.review-diff { display: flex; flex-wrap: wrap; gap: 5px; }
+.diff-add { font-size: 11.5px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; border-radius: 12px; padding: 2px 8px; }
+.diff-rem { font-size: 11.5px; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 12px; padding: 2px 8px; text-decoration: line-through; }
+.diff-none { font-size: 11.5px; color: #94a3b8; font-style: italic; }
+.review-note { font-size: 12.5px; color: #475569; background: #f8fafc; border-radius: 6px; padding: 8px 10px; margin: 10px 0 0; }
+.review-actions { display: flex; gap: 8px; margin-top: 12px; }

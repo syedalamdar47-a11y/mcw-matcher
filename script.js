@@ -50,6 +50,20 @@ const state = {
   helpAnchor: null,    // element id of the ⓘ button it points at
   helpPanelOpen: false,
   helpPanelSearch: "",
+  // --- clinician self-service portal ---
+  myClinicianId: null,   // set when the signed-in user IS a clinician
+  myRecord: null,        // their own clinician row
+  myDraftSpecs: null,    // working copy of their specialties
+  myDraftMods: null,     // working copy of their modalities
+  myNewSpec: "",
+  myNewMod: "",
+  myNote: "",
+  myPending: null,       // their outstanding change request, if any
+  mySubmitBusy: false,
+  mySubmitMsg: "",
+  reviewOpen: false,     // admin review queue
+  reviewRows: null,
+  reviewBusy: false,
   sheetSyncBusy: false,
   sheetSyncReport: null, // result of the last Google-Sheet sync
   sheetReportOpen: false,
@@ -186,7 +200,12 @@ async function loadRole() {
     const { data: u } = await sb.auth.getUser();
     const uid = u && u.user && u.user.id;
     if (!uid) { state.role = "viewer"; return; }
-    const { data, error } = await sb.from("user_roles").select("role").eq("user_id", uid).maybeSingle();
+    // Try the portal-aware shape first; fall back if the migration hasn't run.
+    let { data, error } = await sb.from("user_roles").select("role,clinician_id").eq("user_id", uid).maybeSingle();
+    if (error && /clinician_id/i.test(error.message || "")) {
+      ({ data, error } = await sb.from("user_roles").select("role").eq("user_id", uid).maybeSingle());
+    }
+    state.myClinicianId = (data && data.clinician_id) || null;
     if (error) {
       // ONLY the "roles table not created yet" case falls back to full access
       // (pre-permissions bootstrap). Every other error fails CLOSED to viewer,
@@ -206,13 +225,33 @@ async function loadRole() {
 function can(cap) {
   const r = state.role;
   const full = r === "full" || r === "owner";
+  if (r === "clinician") return false;   // clinicians only ever see their own profile
   switch (cap) {
     case "editStatus": return r !== "viewer" && r !== null;             // frontdesk+
     case "manageRoster": return full || r === "admin";                  // add/edit-details/deactivate
     case "delete": return full;                                         // owner only
     case "manageTeam": return full || r === "admin";                    // invite / roles
+    case "reviewChanges": return full || r === "admin";                 // approve clinician edits
     default: return false;
   }
+}
+
+// A clinician login loads ONLY its own record (RLS enforces this server-side too).
+async function loadMyRecord() {
+  if (!sb || !state.myClinicianId) return;
+  try {
+    const { data } = await sb.from("clinicians").select("*").eq("id", state.myClinicianId).maybeSingle();
+    if (data) {
+      state.myRecord = data;
+      state.myDraftSpecs = (data.specialties || []).slice();
+      state.myDraftMods = (data.modalities || []).slice();
+    }
+    const { data: pend } = await sb.from("clinician_change_requests")
+      .select("id,status,submitted_at,proposed_specialties,proposed_modalities")
+      .eq("clinician_id", state.myClinicianId).eq("status", "pending")
+      .order("submitted_at", { ascending: false }).limit(1);
+    state.myPending = (pend && pend[0]) || null;
+  } catch {}
 }
 
 // ---------- helpers ----------
@@ -735,6 +774,125 @@ function renderRecovery() {
   `;
 }
 
+// ---------- render: clinician self-service portal ----------
+// Shown INSTEAD of the roster when the signed-in user is a clinician. They see
+// only themselves, and they can only PROPOSE changes — approval is required.
+function renderMyProfile() {
+  const c = state.myRecord;
+  if (!c) {
+    return `<div class="login-wrap"><div class="login-card">
+      <div class="login-header">
+        <img src="logo.png?v=2" alt="McNulty Counseling and Wellness" class="login-logo" />
+        <p class="login-title">Your profile isn't linked yet</p>
+      </div>
+      <p style="font-size:13px;color:#475569;line-height:1.6;">Your login works, but it hasn't been connected to your
+      clinician record yet. Please ask the practice office to link it, then sign in again.</p>
+      <button class="login-btn" data-action="signout">Sign out</button>
+    </div></div>`;
+  }
+  const pending = state.myPending;
+  // A clinician can't read the roster (RLS), so the master vocabulary comes from
+  // SEED_DATA plus whatever they already have or have just added.
+  const seed = (typeof SEED_DATA !== "undefined" ? SEED_DATA : []);
+  const allSpecs = uniqueSorted([...seed.flatMap(x => x.specialties || []), ...(c.specialties || []), ...(state.myDraftSpecs || [])]);
+  const allMods = uniqueSorted([...seed.flatMap(x => x.modalities || []), ...(c.modalities || []), ...(state.myDraftMods || [])]);
+  const grid = (label, kind, items, options, newVal) => `
+    <div class="ed-field ed-span">
+      <label>${label} <span class="ed-hint">(${items.length} selected)</span></label>
+      <div class="ed-check-grid">
+        ${options.map(v => `
+          <label class="ed-check">
+            <input type="checkbox" data-action="my-${kind}-toggle" data-val="${escapeHtml(v)}" ${items.includes(v) ? "checked" : ""} ${pending ? "disabled" : ""} />
+            <span>${escapeHtml(v)}</span>
+          </label>`).join("")}
+      </div>
+      ${pending ? "" : `<div class="ed-add-row">
+        <input id="my-${kind}-input" class="edit-input" type="text" placeholder="Add one that isn't listed…" value="${escapeHtml(newVal)}" data-action="my-${kind}-newinput" autocomplete="off" />
+        <button type="button" class="btn-cancel" data-action="my-${kind}-add">Add</button>
+      </div>`}
+    </div>`;
+  return `
+    <div class="portal-wrap">
+      <div class="portal-card">
+        <div class="portal-head">
+          <img src="logo.png?v=2" alt="McNulty Counseling and Wellness" class="portal-logo" />
+          <div>
+            <p class="portal-name">${escapeHtml(c.profile || c.name)}</p>
+            <p class="portal-sub">Your specialties and treatment approaches</p>
+          </div>
+          <button class="signout-btn portal-signout" data-action="signout">Sign out</button>
+        </div>
+        <div class="portal-body">
+          <p class="portal-intro">Keep this up to date so the front office matches you with the right clients.
+          Tick everything you work with, then send it for approval — the clinical director reviews changes before they go live.</p>
+          ${pending ? `<div class="portal-pending">⏳ You have changes awaiting approval (sent ${escapeHtml(new Date(pending.submitted_at).toLocaleDateString())}). You'll be able to edit again once they're reviewed.</div>` : ""}
+          ${state.mySubmitMsg ? `<div class="reset-done">${escapeHtml(state.mySubmitMsg)}</div>` : ""}
+          <div class="editor-grid">
+            ${grid("Specialties", "spec", state.myDraftSpecs || [], allSpecs, state.myNewSpec)}
+            ${grid("Modalities (treatment approaches)", "mod", state.myDraftMods || [], allMods, state.myNewMod)}
+            ${pending ? "" : `
+            <div class="ed-field ed-span">
+              <label for="my-note">Anything the office should know? <span class="ed-hint">(optional)</span></label>
+              <textarea id="my-note" class="edit-input" rows="2" placeholder="e.g. I no longer see clients under 16" data-action="my-note">${escapeHtml(state.myNote)}</textarea>
+            </div>`}
+          </div>
+        </div>
+        ${pending ? "" : `
+        <div class="portal-foot">
+          <button class="btn-save" data-action="my-submit" ${state.mySubmitBusy ? "disabled" : ""}>${state.mySubmitBusy ? "Sending…" : "Send for approval"}</button>
+          <button class="btn-cancel" data-action="my-reset">Undo my changes</button>
+        </div>`}
+      </div>
+    </div>`;
+}
+
+function renderReviewModal() {
+  if (!state.reviewOpen) return "";
+  const rows = state.reviewRows || [];
+  const diff = (before, after) => {
+    const b = before || [], a = after || [];
+    const added = a.filter(x => !b.includes(x)), removed = b.filter(x => !a.includes(x));
+    return `${added.map(x => `<span class="diff-add">+ ${escapeHtml(x)}</span>`).join("")}
+            ${removed.map(x => `<span class="diff-rem">− ${escapeHtml(x)}</span>`).join("")}
+            ${!added.length && !removed.length ? `<span class="diff-none">no change</span>` : ""}`;
+  };
+  return `
+    <div class="modal-overlay">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <span class="title">Clinician change requests</span>
+            <p class="sub">Approve or decline what clinicians submitted about themselves.</p>
+          </div>
+          <button class="modal-close" data-action="review-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${state.reviewBusy && !rows.length ? `<p style="color:#94a3b8;font-size:13px;">Loading…</p>` : ""}
+          ${!state.reviewBusy && !rows.length ? `<p class="audit-ok">✓ Nothing waiting for review.</p>` : ""}
+          ${rows.map(r => `
+            <div class="review-row">
+              <p class="review-who">${escapeHtml(r.profile || r.name)}</p>
+              <p class="review-when">Sent ${escapeHtml(new Date(r.submitted_at).toLocaleString())}</p>
+              <p class="review-label">Specialties</p>
+              <div class="review-diff">${diff(r.current_specialties, r.proposed_specialties)}</div>
+              <p class="review-label">Modalities</p>
+              <div class="review-diff">${diff(r.current_modalities, r.proposed_modalities)}</div>
+              ${r.note ? `<p class="review-note">Their note: ${escapeHtml(r.note)}</p>` : ""}
+              ${(r.current_specialties || []).some(x => !(r.proposed_specialties || []).includes(x))
+                ? `<p class="help-tip">They removed a specialty. Check they have no upcoming clients booked for it before approving.</p>` : ""}
+              <div class="review-actions">
+                <button class="btn-save" data-action="review-approve" data-id="${escapeHtml(r.id)}">Approve</button>
+                <button class="btn-danger" data-action="review-reject" data-id="${escapeHtml(r.id)}">Decline</button>
+              </div>
+            </div>`).join("")}
+        </div>
+        <div class="modal-foot">
+          <button class="btn-cancel" data-action="review-close">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ---------- render: sidebar ----------
 function renderSidebar() {
   const allSpecs = uniqueSorted(state.clinicians.flatMap(c => c.specialties));
@@ -822,6 +980,7 @@ function renderSidebar() {
       <div class="sidebar-foot">
         ${sb && can("manageRoster") ? `<div class="foot-row"><button class="admin-btn add-btn" data-action="editor-open" data-id="__new__">+ Add clinician</button>${helpIcon("add-clinician")}</div>` : ""}
         ${sb && can("manageTeam") ? `<div class="foot-row"><button class="admin-btn" data-action="team-open">👥 Manage team</button>${helpIcon("team-list")}</div>` : ""}
+        ${sb && can("reviewChanges") ? `<button class="admin-btn" data-action="review-open">📝 Clinician change requests</button>` : ""}
         ${sb && SHEET_SYNC.csvUrl && can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="sheet-sync" ${state.sheetSyncBusy ? "disabled" : ""}>${state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet"}</button>${helpIcon("sheet-sync")}</div>` : ""}
         ${can("editStatus") ? `<div class="foot-row"><button class="admin-btn" data-action="admin-open">⚙ Update all clinicians</button>${helpIcon("update-all")}</div>` : ""}
         <button class="admin-btn help-btn" data-action="help-panel-open">? Help — how this app works</button>
@@ -1415,6 +1574,8 @@ function render() {
     root.innerHTML = renderLogin() + renderHelpPopover();
   } else if (state.loading) {
     root.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#94a3b8;font-size:14px;">Loading…</div>`;
+  } else if (state.role === "clinician") {
+    root.innerHTML = renderMyProfile() + renderHelpPopover();
   } else if (state.loadError) {
     root.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center;height:100vh;color:#991b1b;font-size:14px;padding:20px;text-align:center;">
@@ -1435,6 +1596,7 @@ function render() {
       ${renderEditorModal()}
       ${renderSheetReportModal()}
       ${renderTeamModal()}
+      ${renderReviewModal()}
       ${renderHelpPanel()}
       ${renderHelpPopover()}
     `;
@@ -1541,7 +1703,7 @@ function handleAction(action, el, ev) {
         state.authed = true;
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole()]).then(() => {
+        Promise.all([loadClinicians(), loadRole()]).then(() => loadMyRecord()).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -1785,6 +1947,89 @@ function handleAction(action, el, ev) {
       state.modsModalId = null;
       state.modalMods = null;
       render();
+      return;
+    }
+
+    // clinician self-service portal
+    case "my-spec-toggle":
+      state.myDraftSpecs = toggleArr(state.myDraftSpecs || [], el.dataset.val); state.mySubmitMsg = ""; render(); return;
+    case "my-mod-toggle":
+      state.myDraftMods = toggleArr(state.myDraftMods || [], el.dataset.val); state.mySubmitMsg = ""; render(); return;
+    case "my-spec-newinput": state.myNewSpec = el.value; return;
+    case "my-mod-newinput": state.myNewMod = el.value; return;
+    case "my-spec-add": {
+      const t = state.myNewSpec.trim();
+      if (t && !(state.myDraftSpecs || []).some(s => s.toLowerCase() === t.toLowerCase())) state.myDraftSpecs.push(t);
+      state.myNewSpec = ""; render(); return;
+    }
+    case "my-mod-add": {
+      const t = state.myNewMod.trim();
+      if (t && !(state.myDraftMods || []).some(m => m.toLowerCase() === t.toLowerCase())) state.myDraftMods.push(t);
+      state.myNewMod = ""; render(); return;
+    }
+    case "my-note": state.myNote = el.value; return;
+    case "my-reset":
+      state.myDraftSpecs = (state.myRecord.specialties || []).slice();
+      state.myDraftMods = (state.myRecord.modalities || []).slice();
+      state.myNote = ""; state.mySubmitMsg = ""; render(); return;
+    case "my-submit": {
+      if (state.mySubmitBusy) return;
+      state.mySubmitBusy = true; state.mySubmitMsg = ""; render();
+      sb.from("clinician_change_requests").insert({
+        clinician_id: state.myClinicianId,
+        proposed_specialties: state.myDraftSpecs || [],
+        proposed_modalities: state.myDraftMods || [],
+        note: state.myNote || "",
+        status: "pending",
+      }).select("id,submitted_at").then(({ data, error }) => {
+        state.mySubmitBusy = false;
+        if (error) { state.mySubmitMsg = "Could not send: " + error.message; }
+        else {
+          state.mySubmitMsg = "Thank you — your changes were sent for approval.";
+          state.myPending = { id: data && data[0] && data[0].id, submitted_at: new Date().toISOString() };
+        }
+        render();
+      }).catch(() => { state.mySubmitBusy = false; state.mySubmitMsg = "Could not reach the server. Please try again."; render(); });
+      return;
+    }
+
+    // admin review queue
+    case "review-open":
+      state.reviewOpen = true; state.reviewBusy = true; render();
+      sb.from("pending_change_review").select("*").order("submitted_at").then(({ data, error }) => {
+        state.reviewBusy = false;
+        state.reviewRows = error ? [] : (data || []);
+        if (error) alert("Could not load change requests: " + error.message + "\n\n(If the portal migration hasn't been run yet, run clinician-portal-setup.sql first.)");
+        render();
+      });
+      return;
+    case "review-close": state.reviewOpen = false; render(); return;
+    case "review-approve": case "review-reject": {
+      const id = el.dataset.id;
+      const row = (state.reviewRows || []).find(r => r.id === id);
+      if (!row) return;
+      const approving = action === "review-approve";
+      if (!confirm(approving
+        ? `Approve ${row.name}'s changes? Their card updates for the whole team immediately.`
+        : `Decline ${row.name}'s changes? Their card stays as it is.`)) return;
+      const finish = () => sb.from("clinician_change_requests")
+        .update({ status: approving ? "approved" : "rejected", reviewed_at: new Date().toISOString() })
+        .eq("id", id).select("id");
+      const apply = approving
+        ? sb.from("clinicians").update({ specialties: row.proposed_specialties, modalities: row.proposed_modalities }).eq("id", row.clinician_id).select("id")
+        : Promise.resolve({ error: null });
+      Promise.resolve(apply).then(({ error }) => {
+        if (error) { alert("Could not apply the change: " + error.message); return; }
+        return finish().then(({ error: e2 }) => {
+          if (e2) { alert("Applied, but could not mark it reviewed: " + e2.message); return; }
+          state.reviewRows = (state.reviewRows || []).filter(r => r.id !== id);
+          if (approving) {
+            state.clinicians = state.clinicians.map(c => c.id === row.clinician_id
+              ? { ...c, specialties: row.proposed_specialties, modalities: row.proposed_modalities } : c);
+          }
+          render();
+        });
+      }).catch(() => alert("Could not reach the database — nothing was changed."));
       return;
     }
 
@@ -2278,7 +2523,7 @@ async function boot() {
       if (nowAuthed) {
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole()]).then(() => {
+        Promise.all([loadClinicians(), loadRole()]).then(() => loadMyRecord()).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -2290,6 +2535,7 @@ async function boot() {
     });
     if (state.authed) {
       await Promise.all([loadClinicians(), loadRole()]);
+      await loadMyRecord();
       subscribeRealtime();
       if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
     }

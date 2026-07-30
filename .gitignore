@@ -27,3 +27,9 @@ Thumbs.db
 # Python cache
 __pycache__/
 *.pyc
+
+# Credentials — never commit
+.env
+.env.*
+!.env.example
+.sp-profile/
