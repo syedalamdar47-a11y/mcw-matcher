@@ -182,6 +182,14 @@ textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; 
 .admin-row { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; margin-bottom: 8px; }
 .admin-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .admin-row-name { font-weight: 600; font-size: 13px; color: #0f172a; flex: 1; margin: 0; }
+.admin-edit-full { font-size: 11px; font-weight: 500; color: #2d7a35; background: #ecfdf5; border: 1px solid #bbf7d0;
+  border-radius: 14px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+.admin-edit-full:hover { background: #d1fae5; }
+.admin-taglines { margin-top: 10px; border-top: 1px dashed #e2e8f0; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.admin-tagline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.admin-tag-label { font-size: 10px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; min-width: 72px; }
+.admin-none { font-size: 11px; color: #94a3b8; font-style: italic; }
+.admin-tag-hint { font-size: 11px; color: #94a3b8; margin: 2px 0 0; }
 
 /* Footer utility buttons (health / backup / restore) */
 .foot-utils { display: flex; gap: 6px; }

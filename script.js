@@ -1200,8 +1200,10 @@ function renderToolsModal() {
   const roster = [
     sb && can("manageRoster") ? row("editor-open", "+ Add clinician", "add-clinician", 'data-id="__new__"') : "",
     can("editStatus") ? row("admin-open", "⚙ Update all clinicians", "update-all") : "",
-    sb && SHEET_SYNC.csvUrl && can("editStatus")
-      ? row("sheet-sync", state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet", "sheet-sync", state.sheetSyncBusy ? "disabled" : "") : "",
+    // "Sync from Sheet" hidden for now (2026-08-11, Alam) — priorities/specialties/
+    // modalities are managed in-app. Re-enable by restoring this row.
+    // sb && SHEET_SYNC.csvUrl && can("editStatus")
+    //   ? row("sheet-sync", state.sheetSyncBusy ? "⟳ Syncing…" : "⟳ Sync from Sheet", "sheet-sync", state.sheetSyncBusy ? "disabled" : "") : "",
   ].filter(Boolean).join("");
   const team = [
     sb && can("manageTeam") ? row("team-open", "👥 Manage team", "team-list") : "",
@@ -1625,11 +1627,19 @@ function renderAdminModal() {
       if (state.adminOriginal) state.adminOriginal[c.id] = { accepting: c.accepting, priority: c.priority, notes: c.notes };
     }
     const ed = state.adminEdits[c.id];
+    const canFull = sb && can("manageRoster");
+    const specTags = (c.specialties || []).length
+      ? (c.specialties || []).map(s => `<span class="spec-tag">${escapeHtml(s)}</span>`).join("")
+      : `<span class="admin-none">none set</span>`;
+    const modTags = (c.modalities || []).length
+      ? (c.modalities || []).map(m => `<span class="spec-tag">${escapeHtml(m)}</span>`).join("")
+      : `<span class="admin-none">none set</span>`;
     return `
       <div class="admin-row">
         <div class="admin-row-head">
           <p class="admin-row-name">${escapeHtml(c.profile)}</p>
           ${c.offices.map(o => `<span class="office-tag ${officeClass(o)}">${escapeHtml(o)}</span>`).join("")}
+          ${canFull ? `<button class="admin-edit-full" data-action="editor-open" data-id="${escapeHtml(c.id)}" title="Edit name, offices, rates, schedule, specialties and modalities">✏️ Full details</button>` : ""}
         </div>
         <div class="edit-grid">
           <div>
@@ -1653,6 +1663,11 @@ function renderAdminModal() {
           <label>Admin notes</label>
           <textarea id="admin-notes-${escapeHtml(c.id)}" class="edit-input" rows="2" data-action="admin-notes" data-id="${escapeHtml(c.id)}">${escapeHtml(ed.notes || "")}</textarea>
         </div>
+        <div class="admin-taglines">
+          ${c.type === "therapy" ? `<div class="admin-tagline"><span class="admin-tag-label">Specialties</span> <div class="spec-tags">${specTags}</div></div>` : ""}
+          <div class="admin-tagline"><span class="admin-tag-label">Modalities</span> <div class="spec-tags">${modTags}</div></div>
+          ${canFull ? `<p class="admin-tag-hint">Use <strong>✏️ Full details</strong> above to change specialties, modalities, rates, offices or schedule.</p>` : ""}
+        </div>
       </div>
     `;
   };
@@ -1662,7 +1677,7 @@ function renderAdminModal() {
         <div class="modal-head">
           <div>
             <p class="title">Update all clinicians</p>
-            <p class="sub">Edit status, priority, and notes for the whole team — save in one click</p>
+            <p class="sub">Status, priority and notes here — or ✏️ Full details on any clinician to edit their specialties, modalities, rates, offices and schedule</p>
           </div>
           <button class="modal-close" data-action="admin-close">&times;</button>
         </div>
