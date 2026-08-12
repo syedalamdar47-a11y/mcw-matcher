@@ -91,8 +91,14 @@ def busy_intervals(appt_items: list[dict]) -> dict[str, list[tuple[datetime, dat
             continue
         end = _parse(a.get("endTime"))
         if not end:
-            dur = a.get("duration")
-            end = start + timedelta(minutes=int(dur)) if dur else start + timedelta(minutes=50)
+            # Fall back to duration, then to a 50-min default. A malformed
+            # duration (non-numeric) must NOT crash the whole feed — that would
+            # blank every clinician. Treat it as the default instead.
+            try:
+                dur = int(a.get("duration"))
+            except (TypeError, ValueError):
+                dur = 50
+            end = start + timedelta(minutes=dur if dur > 0 else 50)
         if end <= start:
             continue
         out.setdefault(cid, []).append((start, end))

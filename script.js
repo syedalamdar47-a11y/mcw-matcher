@@ -354,6 +354,19 @@ function availabilityIsTrustworthy() {
   if (h.consecutive_failures >= 3) return false;
   return (Date.now() - new Date(h.last_ok_at).getTime()) < AVAIL_STALE_AFTER_MS;
 }
+
+// How many clinician self-service change requests are waiting for review. Drives
+// the "N waiting" badge on ⚙ Admin & tools and the review row. Without this the
+// badge stayed dark forever and submitted changes could sit unseen.
+async function loadPendingCount() {
+  if (!sb || !can("reviewChanges")) { state.pendingCount = 0; return; }
+  try {
+    const { count } = await sb.from("clinician_change_requests")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "pending");
+    state.pendingCount = count || 0;
+  } catch { /* leave the previous count rather than flicker to 0 on a blip */ }
+}
 // (A "departed clinician" — one who left SimplePractice — is now handled by the
 // calendar feed itself: it writes an empty slot list for anyone it no longer
 // finds, so their card shows "No openings listed" rather than frozen chips. No
@@ -459,6 +472,10 @@ function subscribeAvailability() {
         state.availabilityHealth = payload.new;
         render();
       }
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "clinician_change_requests" }, () => {
+      // A clinician submitted or a review happened — refresh the "N waiting" badge live.
+      if (can("reviewChanges")) loadPendingCount().then(render);
     })
     .subscribe((status) => {
       // Same reasoning as the roster channel: missed events are not replayed,
@@ -665,7 +682,7 @@ function renderSlotRow(c) {
         <span class="icon">🕗</span>
         <span class="slot-day-label">${escapeHtml(fullDayLabel(selDate))}:</span>
         ${times.length ? times.map(timeChipHtml).join("") : `<span class="slot-none">No openings this day</span>`}
-        ${dateToggle}
+        ${freshnessChipHtml()}${dateToggle}
       </div>
       ${strip}
     </div>`;
@@ -2107,7 +2124,7 @@ function handleAction(action, el, ev) {
         state.authed = true;
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => loadMyRecord()).then(() => {
+        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => Promise.all([loadMyRecord(), loadPendingCount()])).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -2454,7 +2471,7 @@ function handleAction(action, el, ev) {
             state.clinicians = state.clinicians.map(c => c.id === row.clinician_id
               ? { ...c, specialties: row.proposed_specialties, modalities: row.proposed_modalities } : c);
           }
-          render();
+          loadPendingCount().then(render);  // keep the "N waiting" badge in sync
         });
       }).catch(() => alert("Could not reach the database — nothing was changed."));
       return;
@@ -2958,7 +2975,7 @@ async function boot() {
       if (nowAuthed) {
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => loadMyRecord()).then(() => {
+        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => Promise.all([loadMyRecord(), loadPendingCount()])).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
@@ -2973,6 +2990,7 @@ async function boot() {
     if (state.authed) {
       await Promise.all([loadClinicians(), loadRole(), loadAvailability()]);
       await loadMyRecord();
+      await loadPendingCount();
       subscribeRealtime();
       subscribeAvailability();
       startFreshnessTicker();

@@ -162,6 +162,19 @@ def calendar_availability(settings=None, budget: RequestBudget = None, pacer: Pa
 
     appts = _with_refresh(lambda c: _fetch_appointments(tr, c, budget, pacer))
 
+    # Critical safety gate. A real practice ALWAYS has appointments in a 14-day
+    # window (we routinely see ~800). An EMPTY list therefore means a broken read
+    # — a changed field, an auth hiccup, a partial response — NOT a genuinely
+    # empty calendar. Publishing it would compute every window as free and show
+    # BOOKED times as available, which is the exact failure this whole system
+    # exists to prevent. So refuse: record a failure (the board blanks to "check
+    # SimplePractice") rather than publish a dangerously-wrong "everyone's free".
+    if not appts:
+        sink.record_health("clinician_availability", ok=False, note="empty_appointments")
+        raise RuntimeError(
+            "no appointments returned — refusing to publish (would show booked slots as free)"
+        )
+
     # Availabilities: refresh at most every AVAIL_CACHE_TTL.
     cache_at = _avail_cache["at"]
     stale = cache_at is None or (now_et - cache_at) > AVAIL_CACHE_TTL

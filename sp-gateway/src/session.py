@@ -41,6 +41,46 @@ from .safety import (
 LOGIN_URL = f"https://{SP_LOGIN_HOST}/"
 STATE_FILENAME = "sp-session.enc"
 LOCK_FILENAME = "sp-session.lock"
+LOGIN_FAIL_FILENAME = "login-failures"
+# Stop attempting well before SimplePractice's 5-consecutive-failure account
+# lockout. A bad/rotated password, or a Sift device challenge, would otherwise
+# make the feed retry a sign-in every cycle and march the account into a real
+# lockout that also takes down billing work. This counter persists across cycles
+# AND process restarts; a human clears it (delete the file, or a successful
+# check_login.py --signin) once the underlying issue is resolved.
+MAX_LOGIN_FAILURES = 2
+
+
+def _login_fail_path(settings: Settings) -> Path:
+    return settings.state_dir / LOGIN_FAIL_FILENAME
+
+
+def login_locked(settings: Settings) -> bool:
+    """True once we've hit the consecutive-failure ceiling. Refuse to sign in."""
+    try:
+        return int((_login_fail_path(settings).read_text() or "0").strip()) >= MAX_LOGIN_FAILURES
+    except Exception:
+        return False
+
+
+def _bump_login_failure(settings: Settings) -> None:
+    try:
+        p = _login_fail_path(settings)
+        try:
+            n = int((p.read_text() or "0").strip())
+        except Exception:
+            n = 0
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(n + 1))
+    except Exception:
+        pass
+
+
+def clear_login_failures(settings: Settings) -> None:
+    try:
+        _login_fail_path(settings).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 # Chromium flags that keep fetched content out of the filesystem.
 _NO_DISK_CACHE_ARGS = [
@@ -325,6 +365,7 @@ def refresh_session(settings: Settings) -> bool:
     with exclusive_session_lock(settings):
         with browser_context(settings, budget, pacer) as ctx:
             if is_signed_in(ctx):
+                clear_login_failures(settings)  # session is healthy — reset the ceiling
                 save_state(settings, ctx.storage_state())  # refresh cookie expiry
                 return True
             if sign_in(ctx, settings, guard):
@@ -370,7 +411,15 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
     Returns True on success. On failure it returns False and does NOT retry —
     SimplePractice locks an account after five consecutive failures, so a retry
     loop here is how automation takes real billing work offline.
+
+    A persistent counter (login_locked) stops attempts entirely after
+    MAX_LOGIN_FAILURES so repeated failures across cycles can never reach the
+    lockout. That state requires a human to clear.
     """
+    if login_locked(settings):
+        log(step="sign_in", status="locked_out",
+            reason="too_many_failures_needs_human")
+        return False
     guard.claim()
     page = context.new_page()
     try:
@@ -409,14 +458,16 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
                                             "two_factor", "2fa"))
 
         if challenged:
-            # A step-up challenge is NOT a credential failure. Report it clearly:
-            # this is the Sift/device-verification path the risk review predicted,
-            # and it needs a human to read the biller account's inbox.
+            # A step-up challenge is NOT a credential failure, but retrying it in a
+            # loop is still how an account gets locked — so it counts toward the
+            # ceiling and needs a human to read the biller account's inbox.
+            _bump_login_failure(settings)
             log(step="sign_in", status="challenged",
                 reason="step_up_verification_required")
             return False
         if on_login:
             # No detail logged: the page may render the account identity.
+            _bump_login_failure(settings)
             log(step="sign_in", status="failed", reason="still_on_login_page")
             return False
 
@@ -432,9 +483,11 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
         except Exception:
             still_asking = False
         if still_asking:
+            _bump_login_failure(settings)
             log(step="sign_in", status="failed", reason="password_field_still_present")
             return False
 
+        clear_login_failures(settings)   # a clean sign-in resets the ceiling
         save_state(settings, context.storage_state())
         log(step="sign_in", status="ok")
         return True

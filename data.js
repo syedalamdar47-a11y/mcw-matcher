@@ -18,7 +18,11 @@ const SHEET_SYNC = {
   idColumn: "id",
   priorityColumn: "priority",
   acceptingColumn: "accepting", // set to "" if the sheet shouldn't drive availability
-  autoSyncOnLogin: true,
+  // Turned OFF 2026-08-12: the practice now manages priority/accepting IN-APP, and
+  // the "Sync from Sheet" button is hidden. Leaving auto-sync on would let the now-
+  // stale sheet silently OVERWRITE front-desk edits (including "accepting") on every
+  // login. Re-enable only if the sheet becomes the source of truth again.
+  autoSyncOnLogin: false,
 };
 
 const SEED_DATA = [
