@@ -11,3 +11,19 @@
 /supabase/*                       /404.html  404!
 /sop-kit/*                        /404.html  404!
 /scripts/*                        /404.html  404!
+
+# Added 2026-08-11 at go-live: the availability gateway (backend code — never a
+# web asset), the SOP workspace, CI config, and the new SQL + internal docs.
+/sp-gateway/*                     /404.html  404!
+/sop-workspace/*                  /404.html  404!
+/.github/*                        /404.html  404!
+/add-missing-clinicians.sql       /404.html  404!
+/clinician-portal-setup.sql       /404.html  404!
+/availability-setup.sql           /404.html  404!
+/availability-slots.sql           /404.html  404!
+/availability-days.sql            /404.html  404!
+/multi-slot-setup.sql             /404.html  404!
+/AVAILABILITY-BRIEFING.md         /404.html  404!
+/AVAILABILITY-TROUBLESHOOTING.md  /404.html  404!
+/SEND-TO-SIMPLEPRACTICE.md        /404.html  404!
+/SOP-UPDATE-PLAN.md               /404.html  404!

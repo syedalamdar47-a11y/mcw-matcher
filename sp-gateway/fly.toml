@@ -1,0 +1,63 @@
+# SimplePractice gateway — Fly.io configuration
+#
+# SCHEDULING DECISION (read this before changing anything):
+# Fly has no cron service. `fly machine run --schedule=daily` exists but is
+# coarse (hourly/daily/weekly/monthly) and gives no control over the minute, no
+# at-most-once guarantee across restarts, and no way to run the ~10-minute
+# availability poll. So this app is instead a SINGLE LONG-RUNNING PROCESS with
+# an in-process scheduler (src/runner.py). Trade-off, stated plainly:
+#   + arbitrary intervals, survives restarts, one obvious place to look
+#   + the single-instance guarantee falls out of the volume mount
+#   - the machine is always on, so we pay ~24/7 rather than per-run
+# At this scale that is a few dollars a month and worth it for predictability.
+#
+# NO PUBLIC SERVICES. There is deliberately no [http_service] and no allocated
+# public IP: this machine holds a SimplePractice credential and must not be
+# reachable from the internet. It reaches OUT to SimplePractice and Supabase.
+# Health is published by writing a row to Supabase, not by exposing a port.
+
+app = "mcw-sp-gateway"
+primary_region = "iad"      # Ashburn — close to SimplePractice's us-east infra
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SP_HEADLESS = "1"
+  SP_STATE_DIR = "/data"
+  TZ = "America/New_York"   # the practice's timezone; all weekly buckets derive from it
+
+# Exactly one machine. The volume below can only attach to one machine at a
+# time, which turns "only one process may hold the session" from a convention
+# into something the platform enforces.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"            # headless Chromium is comfortable here; 1gb is not
+  cpus = 2
+
+[[mounts]]
+  source = "sp_gateway_state"
+  destination = "/data"
+  # Holds ONLY the Fernet-encrypted session cookie file. No page content, no
+  # reports, no client data.
+  #
+  # Snapshots are kept to the shortest window Fly permits (it rejects 0; the
+  # valid range is 1-60 days). A snapshot of a session cookie is a liability
+  # with no recovery value: losing the volume costs exactly one fresh sign-in.
+  # Scheduled snapshots are additionally turned off on the volume itself, since
+  # this setting only caps how long they are retained, not whether they are taken.
+  snapshot_retention = 1
+
+[deploy]
+  # Never run two machines at once, even briefly during a deploy: two concurrent
+  # sign-ins is how an account gets flagged.
+  strategy = "immediate"
+
+# No [processes] block on purpose.
+#
+# Fly APPENDS a process command to the image's ENTRYPOINT rather than replacing
+# it. With ENTRYPOINT ["python","-m","src"], adding `app = "python -m src --serve"`
+# produced the literal command `python -m src python -m src --serve`, which
+# argparse rejected — a crash loop that restarted every four seconds.
+# The Dockerfile's ENTRYPOINT + CMD ["--serve"] already yields exactly
+# `python -m src --serve`, so this file must stay out of it.

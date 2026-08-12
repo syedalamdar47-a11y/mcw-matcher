@@ -33,3 +33,12 @@ __pycache__/
 .env.*
 !.env.example
 .sp-profile/
+
+# Internal paste-prompt / recon notes — not app assets, and the spaces in the
+# name make them awkward to block from the public site, so keep them out of git.
+PASTE INTO MATCHER SESSION*.md
+
+# SimplePractice gateway runtime state. Holds the Fernet-encrypted session
+# cookie, which IS the biller account until it expires. Encrypted or not, it
+# has no business in git — and the lock file is machine-local by definition.
+sp-gateway/state/

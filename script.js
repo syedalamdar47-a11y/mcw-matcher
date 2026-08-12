@@ -38,6 +38,13 @@ const state = {
   modalMods: null,
   modalNewMod: "",
   expandedSpecs: new Set(),
+  expandedSlots: new Set(),
+  datesOpen: new Set(),   // card ids whose "pick a date" strip is expanded
+  dateSel: {},            // card id -> chosen "YYYY-MM-DD" (else soonest)
+  // Live SimplePractice availability, keyed by clinician id. Written by the
+  // sp-gateway service on Fly; this app only ever reads it.
+  availability: {},
+  availabilityHealth: null,
   healthOpen: false,
   healthResults: null,
   editorId: null,      // clinician id being edited, or "__new__"
@@ -91,6 +98,12 @@ const state = {
 };
 
 const SPEC_LIMIT = 5;
+// Openings shown per card before "+N more". Four is what the front desk asked
+// for: enough to offer a caller a real choice without burying the rest of the
+// card. SLOT_MAX_SHOWN caps the expanded view — a clinician with sixty openings
+// is not a useful thing to read down a phone line.
+const SLOT_SHOWN = 4;
+const SLOT_MAX_SHOWN = 12;
 
 // ---------- in-app help (ⓘ) ----------
 // Content lives in help.js (globals HELP + HELP_GROUPS) so the popovers and the
@@ -297,6 +310,55 @@ async function loadClinicians() {
   state.loading = false;
 }
 
+// ---------- live availability (read-only) ----------
+// Filled by the sp-gateway service running on Fly.io, which reads MCW's PUBLIC
+// SimplePractice booking page — the same page a prospective client sees. It
+// carries no patient information, and this app never writes to these tables.
+//
+// Deliberately never sets state.loadError or state.loading: if availability is
+// unreachable the roster must still load. Losing appointment times is a
+// degraded feature; losing the roster would stop the front desk working.
+async function loadAvailability() {
+  if (!sb) return;
+  try {
+    let [avail, health] = await Promise.all([
+      sb.from("clinician_availability").select("clinician_id,next_available_at,sp_computed_at,fetched_at,slots,slots_fetched_at,days"),
+      sb.from("gateway_health").select("feed,last_ok_at,last_status,consecutive_failures"),
+    ]);
+    // The `days` column (the "pick a date" browser) may not be migrated yet.
+    // If so, retry without it rather than losing all availability — the date
+    // picker just stays hidden until the column exists.
+    if (avail.error && /days/i.test(avail.error.message || "")) {
+      avail = await sb.from("clinician_availability")
+        .select("clinician_id,next_available_at,sp_computed_at,fetched_at,slots,slots_fetched_at");
+    }
+    const map = {};
+    (avail.data || []).forEach(r => { if (r.clinician_id) map[r.clinician_id] = r; });
+    state.availability = map;
+    state.availabilityHealth = (health.data || []).find(h => h.feed === "clinician_availability")
+      || (health.data || [])[0] || null;
+  } catch {
+    // Silent by design — renderSlotRow() shows the honest "unavailable" state.
+    state.availability = {};
+    state.availabilityHealth = null;
+  }
+}
+
+// How stale before we refuse to show a time at all. Showing nothing is
+// recoverable; an FDO reading out a slot that was taken an hour ago is not.
+const AVAIL_STALE_AFTER_MS = 20 * 60 * 1000;
+
+function availabilityIsTrustworthy() {
+  const h = state.availabilityHealth;
+  if (!h || !h.last_ok_at) return false;
+  if (h.consecutive_failures >= 3) return false;
+  return (Date.now() - new Date(h.last_ok_at).getTime()) < AVAIL_STALE_AFTER_MS;
+}
+// (A "departed clinician" — one who left SimplePractice — is now handled by the
+// calendar feed itself: it writes an empty slot list for anyone it no longer
+// finds, so their card shows "No openings listed" rather than frozen chips. No
+// per-row staleness gate is needed in the UI.)
+
 // Saves the editable fields. In shared mode, writes ONLY the changed rows, and
 // ONLY the fields the calling editor owns (pass fieldKeys) — so two staff editing
 // different aspects of the same clinician never clobber each other, even if the
@@ -372,6 +434,278 @@ function subscribeRealtime() {
         realtimeDropped = true;
       }
     });
+}
+
+// Second live channel, for availability. Kept separate from the clinicians
+// channel so a problem with one never takes down the other.
+let availChannel = null;
+let availDropped = false;
+function subscribeAvailability() {
+  if (!sb || availChannel) return;
+  availChannel = sb
+    .channel("availability-live")
+    .on("postgres_changes", { event: "*", schema: "public", table: "clinician_availability" }, (payload) => {
+      const row = payload.new;
+      if (payload.eventType === "DELETE") {
+        const oldCid = payload.old && payload.old.clinician_id;
+        if (oldCid) delete state.availability[oldCid];
+      } else if (row && row.clinician_id) {
+        state.availability[row.clinician_id] = row;
+      }
+      render();
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "gateway_health" }, (payload) => {
+      if (payload.new && payload.new.feed === "clinician_availability") {
+        state.availabilityHealth = payload.new;
+        render();
+      }
+    })
+    .subscribe((status) => {
+      // Same reasoning as the roster channel: missed events are not replayed,
+      // so refetch on reconnect rather than trusting what is on screen.
+      if (status === "SUBSCRIBED" && availDropped) {
+        availDropped = false;
+        loadAvailability().then(() => render());
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+        availDropped = true;
+      }
+    });
+}
+
+// The "checked 40s ago" label has to keep counting up, but this app repaints the
+// entire screen on every render(). Repainting once a second to advance a clock
+// would fight every interaction on the page. So the age text is patched in place
+// instead — the ONE place this codebase deliberately steps outside its own
+// full-re-render convention, and only ever for text that carries no state.
+let freshnessTimer = null;
+let lastTrustState = null;
+function startFreshnessTicker() {
+  if (freshnessTimer) return;
+  freshnessTimer = setInterval(() => {
+    // Self-enforce staleness on an IDLE tab. The 20-minute cutoff is otherwise
+    // only re-evaluated on a realtime event or a click, so a tab left open
+    // during a gateway outage would keep showing green chips with a climbing
+    // age forever. If the trust verdict has flipped since the last render,
+    // repaint so the cards blank (or come back) on their own.
+    const trust = availabilityIsTrustworthy();
+    if (trust !== lastTrustState) {
+      lastTrustState = trust;
+      render();
+      return; // render() re-runs the ticker's text pass anyway
+    }
+    const nodes = document.querySelectorAll("[data-fresh-at]");
+    nodes.forEach(n => {
+      const t = Number(n.getAttribute("data-fresh-at"));
+      if (t) n.textContent = shortAge(Date.now() - t);
+    });
+  }, 15000);
+}
+
+function shortAge(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + "s ago";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  return h + "h ago";
+}
+
+// "Today 2:00pm" / "Tue 9:30am" — front desk reads these aloud, so the day
+// matters more than the date.
+//
+// ALWAYS rendered in the practice's timezone, never the viewer's. An appointment
+// is at 11am in St Petersburg whether the person reading the screen is in
+// Florida, working remotely, or travelling. Leaving this to the browser's local
+// zone would silently shift every time on the card, and the failure mode is
+// someone reading a wrong time to a client on the phone.
+const PRACTICE_TZ = "America/New_York";
+
+function practiceDayKey(d) {
+  // en-CA gives YYYY-MM-DD, which sorts and compares as a plain string.
+  return d.toLocaleDateString("en-CA", { timeZone: PRACTICE_TZ });
+}
+
+function slotTime(d) {
+  return d.toLocaleTimeString("en-US", {
+    timeZone: PRACTICE_TZ, hour: "numeric", minute: "2-digit",
+  }).replace(/\s/g, "").toLowerCase();
+}
+
+// Chip label. Spells the month and weekday so nobody has to decode "8/13", and
+// keeps Today/Tomorrow for the near days. Always Eastern (St. Petersburg).
+function formatSlot(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const time = slotTime(d);
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const key = practiceDayKey(d);
+  if (key === practiceDayKey(now)) return "Today · " + time;
+  if (key === practiceDayKey(tomorrow)) return "Tomorrow · " + time;
+  const date = d.toLocaleDateString("en-US", {
+    timeZone: PRACTICE_TZ, weekday: "short", month: "short", day: "numeric",
+  });                                        // e.g. "Thu, Aug 13"
+  return date + " · " + time;
+}
+
+// Full unambiguous label for the hover tooltip — spelled out, with the timezone
+// named, so there is never a doubt when reading it to a caller.
+function fullSlotLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const date = d.toLocaleDateString("en-US", {
+    timeZone: PRACTICE_TZ, weekday: "long", month: "long", day: "numeric", year: "numeric",
+  });
+  return date + " at " + slotTime(d) + " Eastern (St. Petersburg time)";
+}
+
+// The availability strip on a clinician card.
+//
+// Three honest states, and the quiet one matters most: when the gateway is
+// unhealthy we say so plainly rather than showing the last time we happened to
+// know about. A blank is recoverable; a confidently wrong time read to a client
+// on the phone is not.
+// One global "checked Ns ago", driven by the gateway_health heartbeat rather
+// than a per-clinician stamp. The gateway now writes a clinician's row ONLY when
+// their openings actually change, so a per-row time would read "2h ago" for a
+// stable clinician even though we re-checked 15s ago — misleading. The heartbeat
+// advances every cycle, so it is the truthful "when did we last check anyone".
+function freshnessChipHtml() {
+  const h = state.availabilityHealth;
+  const t = h && h.last_ok_at ? new Date(h.last_ok_at).getTime() : 0;
+  if (!t) return "";
+  return `<span class="slot-age" data-fresh-at="${t}" title="When the live-availability service last checked SimplePractice">${escapeHtml(shortAge(Date.now() - t))}</span>`;
+}
+
+function slotChipHtml(iso) {
+  return `<span class="slot-chip" title="${escapeHtml(fullSlotLabel(iso))}">${escapeHtml(formatSlot(iso))}</span>`;
+}
+
+// Chip for a slot when a specific date is already chosen — the date is redundant
+// then, so show just the time to keep the day's list compact.
+function timeChipHtml(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return `<span class="slot-chip" title="${escapeHtml(fullSlotLabel(iso))}">${escapeHtml(slotTime(d))}</span>`;
+}
+
+// Short label for a date button: "Tue 12".
+function dayButtonLabel(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  if (isNaN(d)) return dateStr;
+  const now = new Date();
+  const key = practiceDayKey(d);
+  if (key === practiceDayKey(now)) return "Today";
+  const tomorrow = new Date(now.getTime() + 86400000);
+  if (key === practiceDayKey(tomorrow)) return "Tomorrow";
+  const wd = d.toLocaleDateString("en-US", { timeZone: PRACTICE_TZ, weekday: "short" });
+  const dn = d.toLocaleDateString("en-US", { timeZone: PRACTICE_TZ, day: "numeric" });
+  return wd + " " + dn;   // "Wed 12"
+}
+
+// The horizontal "pick a date" strip: one button per upcoming day that has
+// openings, plus a "Soonest" button to return to the default view.
+function renderDateStrip(c, days, selDate) {
+  const btns = days.map(d => {
+    const active = d.date === selDate ? " active" : "";
+    const n = (d.slots || []).length;
+    return `<button class="date-btn${active}" data-action="date-pick" data-id="${escapeHtml(c.id)}" data-date="${escapeHtml(d.date)}">${escapeHtml(dayButtonLabel(d.date))}<span class="date-n">${n}</span></button>`;
+  }).join("");
+  const soonestActive = selDate ? "" : " active";
+  return `<div class="date-strip">
+    <button class="date-btn${soonestActive}" data-action="date-soonest" data-id="${escapeHtml(c.id)}">Soonest</button>
+    ${btns}
+  </div>`;
+}
+
+// The availability strip on a clinician card.
+//
+// Three honest states, and the quiet one matters most: when the service is
+// unhealthy we say so plainly rather than showing the last time we happened to
+// know about. A blank is recoverable; a confidently wrong time read to a client
+// on the phone is not.
+function renderSlotRow(c) {
+  if (!sb) return "";
+  const row = state.availability[c.id];
+
+  if (!availabilityIsTrustworthy()) {
+    return `<div class="slot-row slot-row-off">
+      <span class="icon">🕗</span>
+      <span>Live times unavailable — check SimplePractice before offering a time</span>
+    </div>`;
+  }
+  if (!row) {
+    return `<div class="slot-row slot-row-off">
+      <span class="icon">🕗</span><span>Not bookable online</span>
+    </div>`;
+  }
+  if (!row.next_available_at && !(row.slots && row.slots.length)) {
+    return `<div class="slot-row">
+      <span class="icon">🕗</span><span class="slot-none">No openings listed</span>
+      ${freshnessChipHtml()}
+    </div>`;
+  }
+
+  const days = Array.isArray(row.days) ? row.days : [];
+  const datesOpen = state.datesOpen.has(c.id);
+  const selDate = state.dateSel[c.id];
+
+  // A date-picker toggle, shown when there is more than one upcoming day to browse.
+  const dateToggle = days.length > 1
+    ? `<button class="dates-toggle" data-action="dates-toggle" data-id="${escapeHtml(c.id)}" title="See openings on a specific upcoming date">📅 ${datesOpen ? "Hide dates" : "Pick a date"}</button>`
+    : "";
+  const strip = datesOpen ? renderDateStrip(c, days, selDate) : "";
+
+  // ---- A specific future date is chosen: show that day's openings ----
+  if (selDate) {
+    const day = days.find(d => d.date === selDate);
+    const times = (day && day.slots) ? day.slots : [];
+    return `<div class="slot-block">
+      <div class="slot-row">
+        <span class="icon">🕗</span>
+        <span class="slot-day-label">${escapeHtml(fullDayLabel(selDate))}:</span>
+        ${times.length ? times.map(timeChipHtml).join("") : `<span class="slot-none">No openings this day</span>`}
+        ${dateToggle}
+      </div>
+      ${strip}
+    </div>`;
+  }
+
+  // ---- Default: soonest openings (unchanged behaviour) ----
+  const all = Array.isArray(row.slots) ? row.slots.filter(s => s && s.start) : [];
+  const expanded = state.expandedSlots.has(c.id);
+  const shown = expanded ? all.slice(0, SLOT_MAX_SHOWN) : all.slice(0, SLOT_SHOWN);
+  const hiddenCount = Math.min(all.length, SLOT_MAX_SHOWN) - shown.length;
+
+  if (!all.length) {
+    return `<div class="slot-block"><div class="slot-row">
+      <span class="icon">🕗</span>
+      ${slotChipHtml(row.next_available_at)}
+      ${freshnessChipHtml()}${dateToggle}
+    </div>${strip}</div>`;
+  }
+
+  return `<div class="slot-block">
+    <div class="slot-row">
+      <span class="icon">🕗</span>
+      ${shown.map(s => slotChipHtml(s.start)).join("")}
+      ${hiddenCount > 0 ? `<button class="more-btn" data-action="slots-expand" data-id="${escapeHtml(c.id)}">+${hiddenCount} more</button>` : ""}
+      ${expanded ? `<button class="less-btn" data-action="slots-collapse" data-id="${escapeHtml(c.id)}">show less</button>` : ""}
+      ${freshnessChipHtml()}${dateToggle}
+    </div>
+    ${strip}
+  </div>`;
+}
+
+// "Tuesday, August 12" for the chosen-date header.
+function fullDayLabel(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  if (isNaN(d)) return dateStr;
+  const now = new Date();
+  if (practiceDayKey(d) === practiceDayKey(now)) return "Today";
+  const tomorrow = new Date(now.getTime() + 86400000);
+  if (practiceDayKey(d) === practiceDayKey(tomorrow)) return "Tomorrow";
+  return d.toLocaleDateString("en-US", { timeZone: PRACTICE_TZ, weekday: "long", month: "long", day: "numeric" });
 }
 
 function uniqueSorted(arr) {
@@ -1085,6 +1419,7 @@ function renderCard(c) {
           <div class="meta-row"><span class="icon">📅</span><span>${escapeHtml(c.schedule)}</span></div>
           ${rates.length ? `<div class="meta-row"><span class="icon">💲</span><span>${escapeHtml(rates.join(" · "))}</span></div>` : ""}
           ${c.groups.length ? `<div class="meta-row"><span class="icon">👥</span><span>${escapeHtml(c.groups.join(", "))}</span></div>` : ""}
+          ${renderSlotRow(c)}
         </div>
 
         <div class="section">
@@ -1165,6 +1500,7 @@ function renderMainPane() {
       <div class="main-bar">
         <div class="main-bar-left">
           <span class="count-text"><strong>${filtered.length}</strong> clinician${filtered.length !== 1 ? "s" : ""}</span>${helpIcon("card-anatomy")}
+          ${sb ? `<span class="tz-note" title="Every appointment time on this page is shown in Eastern time (the practice's timezone), no matter where you are viewing from.">🕗 Times in Eastern (St. Petersburg)</span>` : ""}
           ${state.selectedSpecs.map(sp => `
             <span class="chip chip-spec">${escapeHtml(sp)}<button data-action="spec-toggle" data-spec="${escapeHtml(sp)}">×</button></span>
           `).join("")}
@@ -1756,10 +2092,12 @@ function handleAction(action, el, ev) {
         state.authed = true;
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole()]).then(() => loadMyRecord()).then(() => {
+        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => loadMyRecord()).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
+          subscribeAvailability();
+          startFreshnessTicker();
           if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
         });
       }).catch(() => {
@@ -1873,6 +2211,22 @@ function handleAction(action, el, ev) {
       state.expandedSpecs.add(el.dataset.id); render(); return;
     case "specs-collapse":
       state.expandedSpecs.delete(el.dataset.id); render(); return;
+    case "slots-expand":
+      state.expandedSlots.add(el.dataset.id); render(); return;
+    case "slots-collapse":
+      state.expandedSlots.delete(el.dataset.id); render(); return;
+    case "dates-toggle":
+      if (state.datesOpen.has(el.dataset.id)) {
+        state.datesOpen.delete(el.dataset.id);
+        delete state.dateSel[el.dataset.id];   // closing resets to soonest
+      } else {
+        state.datesOpen.add(el.dataset.id);
+      }
+      render(); return;
+    case "date-pick":
+      state.dateSel[el.dataset.id] = el.dataset.date; render(); return;
+    case "date-soonest":
+      delete state.dateSel[el.dataset.id]; render(); return;
     case "card-edit-start": {
       const c = state.clinicians.find(x => x.id === el.dataset.id);
       state.editingCardId = el.dataset.id;
@@ -2589,10 +2943,12 @@ async function boot() {
       if (nowAuthed) {
         state.loading = true;
         render();
-        Promise.all([loadClinicians(), loadRole()]).then(() => loadMyRecord()).then(() => {
+        Promise.all([loadClinicians(), loadRole(), loadAvailability()]).then(() => loadMyRecord()).then(() => {
           state.loading = false;
           render();
           subscribeRealtime();
+          subscribeAvailability();
+          startFreshnessTicker();
           if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
         });
       } else {
@@ -2600,9 +2956,11 @@ async function boot() {
       }
     });
     if (state.authed) {
-      await Promise.all([loadClinicians(), loadRole()]);
+      await Promise.all([loadClinicians(), loadRole(), loadAvailability()]);
       await loadMyRecord();
       subscribeRealtime();
+      subscribeAvailability();
+      startFreshnessTicker();
       if (SHEET_SYNC.autoSyncOnLogin) syncFromSheet(false);
     }
     state.loading = false;
