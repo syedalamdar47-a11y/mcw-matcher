@@ -2053,6 +2053,39 @@ function clearAllFilters() {
   state.selectedMods = [];
 }
 
+// supabase-js surfaces an Edge Function failure as a generic
+// "Edge Function returned a non-2xx status code" and hides the REAL reason our
+// function sent (e.g. "email rate limit exceeded", "already been registered")
+// inside error.context — the raw Response, thrown before its body is read. Dig
+// the JSON {error} out of it so the person sees why, not a status-code riddle.
+async function readFunctionError(error, data) {
+  if (!error) return data && data.error;
+  const ctx = error.context;
+  if (ctx && typeof ctx.clone === "function") {
+    try {
+      const body = await ctx.clone().json();
+      if (body && body.error) return body.error;
+    } catch (_) {
+      try { const t = await ctx.clone().text(); if (t && t.trim()) return t.trim().slice(0, 300); } catch (_) {}
+    }
+  }
+  return error.message;
+}
+
+// Turn the raw invite error into plain-English guidance an FDO can act on.
+function friendlyInviteError(msg, email) {
+  const m = String(msg || "");
+  if (/rate limit|too many|429/i.test(m))
+    return "Invite failed: the email limit was hit. On the default setup Supabase only sends a few invite emails per hour. Wait about an hour and try again — or set up a custom email sender (SMTP) so invites always go out.";
+  if (/already.*registered|already.*exists|duplicate|has already/i.test(m))
+    return `Invite failed: ${email} already has a login. If they aren't in the list above, there's a leftover account — delete it under Supabase → Authentication → Users, then invite again.`;
+  if (/redirect|not allowed|invalid.*url|url.*not/i.test(m))
+    return "Invite failed: the invite's site link isn't allow-listed. Add the Matcher URL under Supabase → Authentication → URL Configuration, then retry.";
+  if (/smtp|email.*(provider|server|send)/i.test(m))
+    return "Invite failed: the email sender (SMTP) rejected it. Check Supabase → Authentication → Emails/SMTP settings.";
+  return "Invite failed: " + m;
+}
+
 function handleAction(action, el, ev) {
   switch (action) {
     case "login-input":
@@ -2628,13 +2661,13 @@ function handleAction(action, el, ev) {
       state.teamError = "";
       state.inviteMsg = "";
       render();
-      sb.functions.invoke("manage-team", { body: { action: "invite", email, role: state.inviteRole } }).then(({ data, error }) => {
+      sb.functions.invoke("manage-team", { body: { action: "invite", email, role: state.inviteRole } }).then(async ({ data, error }) => {
         state.inviteBusy = false;
-        const errMsg = error ? error.message : (data && data.error);
+        const errMsg = await readFunctionError(error, data);
         if (errMsg) {
           state.teamError = /not found|failed to send a request|Failed to fetch/i.test(errMsg)
             ? "Invite couldn't be sent — the team-management function isn't deployed yet (see setup steps). Role changes still work."
-            : "Invite failed: " + errMsg;
+            : friendlyInviteError(errMsg, email);
         } else {
           state.inviteMsg = `Invite sent to ${email}. They'll get an email to set their password.`;
           state.inviteEmail = "";
@@ -2662,8 +2695,8 @@ function handleAction(action, el, ev) {
       const uid = el.dataset.uid;
       const email = el.dataset.email;
       if (!confirm(`Remove ${email || "this person"}? They will no longer be able to sign in.`)) return;
-      sb.functions.invoke("manage-team", { body: { action: "remove", user_id: uid } }).then(({ data, error }) => {
-        const errMsg = error ? error.message : (data && data.error);
+      sb.functions.invoke("manage-team", { body: { action: "remove", user_id: uid } }).then(async ({ data, error }) => {
+        const errMsg = await readFunctionError(error, data);
         if (errMsg) alert("Could not remove: " + errMsg + "\n\n(If the team-management function isn't deployed yet, set the person to Viewer instead to revoke their access.)");
         else { state.teamUsers = (state.teamUsers || []).filter(u => u.user_id !== uid); render(); }
       }).catch(() => alert("Could not remove — the team-management function isn't deployed yet. Set the person to Viewer to revoke access in the meantime."));
