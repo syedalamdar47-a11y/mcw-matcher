@@ -82,6 +82,11 @@ const state = {
   resetBusy: false,
   resetError: "",
   linkError: "",         // a reset/invite link that arrived dead (expired/used/scanned)
+  pwSetFor: null,        // user_id whose temp-password form is open in Manage team
+  pwSetValue: "",
+  pwSetBusy: false,
+  pwSetError: "",
+  pwSetMsg: "",
   recoveryMode: false,   // arrived via a reset-email link — must set a new password
   recoveryPw: "",
   recoveryPw2: "",
@@ -1912,10 +1917,12 @@ function renderTeamModal() {
             <button class="btn-save" data-action="invite-send" ${state.inviteBusy ? "disabled" : ""}>${state.inviteBusy ? "Sending…" : "Send invite"}</button>
           </div>
           ${state.inviteMsg ? `<p class="reset-done" style="margin-top:10px;">${escapeHtml(state.inviteMsg)}</p>` : ""}
+          ${state.pwSetMsg ? `<p class="reset-done" style="margin-top:10px;">${escapeHtml(state.pwSetMsg)}</p>` : ""}
           <p class="admin-section-label spaced">Current team${users.length ? " (" + users.length + ")" : ""}</p>
           ${state.teamBusy && !users.length ? `<p style="color:#94a3b8;font-size:13px;">Loading…</p>` : ""}
           ${users.map(u => {
             const rowOwner = u.role === "owner";
+            const pwOpen = state.pwSetFor === u.user_id;
             return `
               <div class="team-row">
                 <div class="team-user">${escapeHtml(u.email || u.user_id)} <span class="team-role-badge role-${u.role}">${ROLE_LABELS[u.role] || u.role}</span></div>
@@ -1923,9 +1930,18 @@ function renderTeamModal() {
                   ${rowOwner
                     ? `<span class="team-owner-lock">Practice owner</span>`
                     : `<select data-action="team-role-change" data-uid="${escapeHtml(u.user_id)}">${roleOpts(u.role)}</select>
+                       <button class="btn-cancel" data-action="team-pw-open" data-uid="${escapeHtml(u.user_id)}">Set password</button>
                        <button class="btn-danger" data-action="team-remove" data-uid="${escapeHtml(u.user_id)}" data-email="${escapeHtml(u.email || "")}">Remove</button>`}
                 </div>
-              </div>`;
+              </div>
+              ${pwOpen ? `
+              <div class="team-pw-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:-4px 0 12px;padding:10px;background:#f1f5f9;border-radius:8px;">
+                <input class="edit-input" style="flex:1;min-width:180px;" type="text" placeholder="Temporary password (min 8 characters)" value="${escapeHtml(state.pwSetValue)}" data-action="team-pw-input" autocomplete="off" spellcheck="false" />
+                <button class="btn-save" data-action="team-pw-save" data-uid="${escapeHtml(u.user_id)}" data-email="${escapeHtml(u.email || "")}" ${state.pwSetBusy ? "disabled" : ""}>${state.pwSetBusy ? "Setting…" : "Set"}</button>
+                <button class="btn-cancel" data-action="team-pw-cancel">Cancel</button>
+                ${state.pwSetError ? `<span class="login-error" style="flex-basis:100%;margin:0;">${escapeHtml(state.pwSetError)}</span>` : ""}
+                <p class="reset-intro" style="flex-basis:100%;margin:2px 0 0;">Type a temporary password, click <b>Set</b>, then tell ${escapeHtml(u.email || "them")} to sign in with it (no email needed). They can keep it or change it later.</p>
+              </div>` : ""}`;
           }).join("")}
         </div>
         <div class="modal-foot">
@@ -2704,6 +2720,53 @@ function handleAction(action, el, ev) {
         if (errMsg) alert("Could not remove: " + errMsg + "\n\n(If the team-management function isn't deployed yet, set the person to Viewer instead to revoke their access.)");
         else { state.teamUsers = (state.teamUsers || []).filter(u => u.user_id !== uid); render(); }
       }).catch(() => alert("Could not remove — the team-management function isn't deployed yet. Set the person to Viewer to revoke access in the meantime."));
+      return;
+    }
+    case "team-pw-open":
+      state.pwSetFor = el.dataset.uid;
+      state.pwSetValue = "";
+      state.pwSetError = "";
+      state.pwSetMsg = "";
+      render();
+      return;
+    case "team-pw-input":
+      state.pwSetValue = el.value;      // no render — keep focus in the field
+      state.pwSetError = "";
+      return;
+    case "team-pw-cancel":
+      state.pwSetFor = null;
+      state.pwSetValue = "";
+      state.pwSetError = "";
+      render();
+      return;
+    case "team-pw-save": {
+      if (state.pwSetBusy) return;
+      const uid = el.dataset.uid;
+      const email = el.dataset.email;
+      const pw = (state.pwSetValue || "").trim();
+      if (pw.length < 8) { state.pwSetError = "Use at least 8 characters."; render(); return; }
+      state.pwSetBusy = true;
+      state.pwSetError = "";
+      render();
+      sb.functions.invoke("manage-team", { body: { action: "set_password", user_id: uid, password: pw } }).then(async ({ data, error }) => {
+        state.pwSetBusy = false;
+        const errMsg = await readFunctionError(error, data);
+        if (errMsg) {
+          state.pwSetError = /not found|failed to send a request|Failed to fetch/i.test(errMsg)
+            ? "The team-management function needs re-deploying (see setup) before this works."
+            : errMsg;
+          render();
+          return;
+        }
+        state.pwSetFor = null;
+        state.pwSetValue = "";
+        state.pwSetMsg = `Temporary password set for ${email || "that person"}. Tell them to sign in with it now — no email needed.`;
+        render();
+      }).catch(() => {
+        state.pwSetBusy = false;
+        state.pwSetError = "Couldn't reach the server — check your connection and try again.";
+        render();
+      });
       return;
     }
 

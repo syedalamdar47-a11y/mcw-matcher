@@ -64,6 +64,26 @@ Deno.serve(async (req) => {
       return json({ ok: true, user_id: invited.user.id, role });
     }
 
+    // 2b) Set a temporary password directly — no email involved.
+    // For onboarding when the mail system is unreliable (e.g. Microsoft
+    // quarantines/consumes reset links): the admin sets a temp password and
+    // tells the person, who signs in immediately and can change it later.
+    if (action === "set_password") {
+      const targetId = String(body.user_id || "");
+      const password = String(body.password || "");
+      if (!targetId) return json({ error: "user_id is required." }, 400);
+      if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
+      const { data: targetRow } = await admin.from("user_roles").select("role").eq("user_id", targetId).maybeSingle();
+      if (targetRow?.role === "owner") return json({ error: "The practice owner's password can't be set here." }, 403);
+      if (targetRow?.role === "admin" && !isOwner) return json({ error: "Only the Owner can set an Admin's password." }, 403);
+      // email_confirm:true so an invited-but-never-confirmed user (their invite
+      // email may have been quarantined) can sign in right away — otherwise
+      // "Email not confirmed" would block them.
+      const { error: updErr } = await admin.auth.admin.updateUserById(targetId, { password, email_confirm: true });
+      if (updErr) return json({ error: updErr.message }, 400);
+      return json({ ok: true });
+    }
+
     // 3) Remove a staff member.
     if (action === "remove") {
       const targetId = String(body.user_id || "");
