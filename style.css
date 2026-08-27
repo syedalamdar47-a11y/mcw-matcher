@@ -195,6 +195,9 @@ textarea.edit-input { resize: vertical; font-family: inherit; min-height: 32px; 
 .foot-utils { display: flex; gap: 6px; }
 .foot-utils button { flex: 1; font-size: 11px; background: rgba(255,255,255,0.06); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 6px 4px; cursor: pointer; }
 .foot-utils button:hover { background: rgba(255,255,255,0.14); }
+.foot-user { font-size: 11.5px; color: #94a3b8; line-height: 1.35; word-break: break-word; margin-bottom: 2px; }
+.foot-user b { color: #fff; font-weight: 600; }
+.foot-user-role { color: #86c787; }
 
 /* Health check panel */
 .audit-ok { text-align: center; color: #16a34a; padding: 28px 0; font-size: 14px; font-weight: 500; }

@@ -1310,6 +1310,15 @@ function renderReviewModal() {
     </div>`;
 }
 
+// A friendly name for the signed-in person: a clinician's real name if we have
+// it, otherwise derived from the email local-part ("kelvin@…" -> "Kelvin").
+function currentUserName() {
+  if (state.myRecord && state.myRecord.name) return state.myRecord.name;
+  const local = (state.userEmail || "").split("@")[0] || "";
+  if (!local) return "Signed in";
+  return local.replace(/[._-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // ---------- render: sidebar ----------
 function renderSidebar() {
   const allSpecs = uniqueSorted(state.clinicians.flatMap(c => c.specialties));
@@ -1396,6 +1405,7 @@ function renderSidebar() {
         ${hasFilters ? `<button class="clear-all-btn" data-action="clear-all">Clear all filters</button>` : ""}
       </div>
       <div class="sidebar-foot">
+        <div class="foot-user" title="${escapeHtml(state.userEmail || "")}">Signed in as <b>${escapeHtml(currentUserName())}</b>${state.role && state.role !== "full" ? ` · <span class="foot-user-role">${escapeHtml(ROLE_LABELS[state.role] || state.role)}</span>` : ""}</div>
         ${can("editStatus") || can("manageTeam") || can("manageRoster")
           ? `<button class="admin-btn tools-btn" id="tools-btn" data-action="tools-open" aria-haspopup="dialog">⚙ Admin &amp; tools${state.pendingCount ? `<span class="tools-badge">${state.pendingCount}</span>` : ""}</button>`
           : ""}
