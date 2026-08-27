@@ -81,6 +81,7 @@ const state = {
   resetSent: false,
   resetBusy: false,
   resetError: "",
+  linkError: "",         // a reset/invite link that arrived dead (expired/used/scanned)
   recoveryMode: false,   // arrived via a reset-email link — must set a new password
   recoveryPw: "",
   recoveryPw2: "",
@@ -1037,6 +1038,7 @@ function renderLogin() {
             <p class="reset-done">✓ If that email has an account, a reset link is on its way. Open the email and click the link — it brings you back here to choose a new password.</p>
             <button type="button" class="login-btn" data-action="reset-back">Back to sign in</button>
           ` : `
+            ${state.linkError ? `<p class="login-error">${escapeHtml(state.linkError)}</p>` : ""}
             <p class="reset-intro">Enter your work email and we'll send you a password-reset link.</p>
             <label class="login-label" for="login-email">Email</label>
             <input
@@ -2108,6 +2110,7 @@ function handleAction(action, el, ev) {
       state.resetMode = false;
       state.resetSent = false;
       state.resetError = "";
+      state.linkError = "";
       render();
       return;
     case "reset-send": {
@@ -2117,6 +2120,7 @@ function handleAction(action, el, ev) {
       if (!email) { state.resetError = "Enter your email address first."; render(); return; }
       state.resetBusy = true;
       state.resetError = "";
+      state.linkError = "";
       render();
       sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname }).then(({ error }) => {
         state.resetBusy = false;
@@ -2986,7 +2990,22 @@ async function boot() {
     state.loading = true;
     // Arriving via a password-reset OR invite email link? Show the set-password
     // form (the hash carries type=recovery / type=invite before supabase-js parses it).
-    if (window.location.hash.includes("type=recovery") || window.location.hash.includes("type=invite")) state.recoveryMode = true;
+    const _urlHash = window.location.hash || "";
+    const _urlAll = _urlHash + (window.location.search || "");
+    if (_urlHash.includes("type=recovery") || _urlHash.includes("type=invite")) {
+      state.recoveryMode = true;
+    } else if (/(error|error_code|error_description)=/.test(_urlAll)) {
+      // The link came back DEAD — expired, already used, or a mail-security
+      // scanner (e.g. Microsoft Safe Links) fetched it first and burned the
+      // one-time token before the human clicked. Rather than silently strand the
+      // user on the login screen with no clue, explain it and drop them straight
+      // into "request a new link".
+      state.resetMode = true;
+      state.linkError = /expired|otp_expired|invalid|denied/i.test(_urlAll)
+        ? "That reset link had already expired or been used. Request a fresh one below, then open it and click within a couple of minutes."
+        : "That reset link didn't go through. Request a new one below.";
+      try { history.replaceState(null, "", window.location.pathname); } catch (_) {}
+    }
     render(); // show something immediately instead of a blank page
     try {
       const { data } = await sb.auth.getSession();
