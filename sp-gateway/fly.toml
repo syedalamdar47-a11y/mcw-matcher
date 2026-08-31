@@ -53,7 +53,7 @@ primary_region = "iad"      # Ashburn — close to SimplePractice's us-east infr
   # sign-ins is how an account gets flagged.
   strategy = "immediate"
 
-[restart]
+[[restart]]
   # Always bring the process back, whatever the exit code — including the
   # watchdog's deliberate exit(1) on a hung loop. Without this, a machine that
   # stops (crash-loop giveup, host maintenance) can simply stay stopped, which
