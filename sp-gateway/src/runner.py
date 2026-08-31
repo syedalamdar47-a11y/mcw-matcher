@@ -290,6 +290,11 @@ def main() -> int:
             log_exception(exc, feed=match.name, status="failed")
             return 1
 
+    # Serve mode owns the machine: sweep any lock a force-killed predecessor
+    # left behind (safe only here — a --once run may coexist with a live serve).
+    from .session import clear_stale_lock_at_boot
+
+    clear_stale_lock_at_boot(settings)
     Scheduler(settings).run_forever()
     return 0
 

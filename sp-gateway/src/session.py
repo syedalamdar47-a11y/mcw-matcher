@@ -162,6 +162,27 @@ def load_state(settings: Settings) -> dict[str, Any] | None:
 # Single-instance lock
 # --------------------------------------------------------------------------
 
+def clear_stale_lock_at_boot(settings: Settings) -> None:
+    """Remove a lock file left behind by a force-killed predecessor.
+
+    Called ONLY at --serve startup. At that moment this container has just
+    booted, so no process in it can legitimately hold the lock: the volume
+    attaches to exactly one machine, and a machine restart kills every process
+    in the container together. A lock created by the previous container whose
+    process died between lock-create and cleanup (e.g. the hung process that
+    was force-killed on 2026-08-31) is therefore always stale here. Left in
+    place it blocks every sign-in with a SafetyViolation until a human deletes
+    it over ssh — which is how a 30-second restart becomes a day-long outage.
+    """
+    lock_path = settings.state_dir / LOCK_FILENAME
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+            log(step="startup", status="cleared_stale_lock")
+    except Exception:
+        log(step="startup", status="stale_lock_not_cleared")
+
+
 @contextmanager
 def exclusive_session_lock(settings: Settings) -> Iterator[None]:
     settings.state_dir.mkdir(parents=True, exist_ok=True)
