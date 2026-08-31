@@ -25,6 +25,7 @@ EFFICIENCY / ACCOUNT SAFETY
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -63,6 +64,11 @@ def _now_et() -> datetime:
 
 
 def _within_business_hours(now_et: datetime) -> bool:
+    # Temporary override for demos/recordings outside ET business hours:
+    #   fly secrets set CAL_ALWAYS_ON=1    -> feed runs 24/7
+    #   fly secrets unset CAL_ALWAYS_ON    -> back to 6am-8pm ET
+    if os.environ.get("CAL_ALWAYS_ON") == "1":
+        return True
     return BUSINESS_START_H <= now_et.hour < BUSINESS_END_H
 
 
