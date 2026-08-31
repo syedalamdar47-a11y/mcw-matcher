@@ -53,6 +53,13 @@ primary_region = "iad"      # Ashburn — close to SimplePractice's us-east infr
   # sign-ins is how an account gets flagged.
   strategy = "immediate"
 
+[restart]
+  # Always bring the process back, whatever the exit code — including the
+  # watchdog's deliberate exit(1) on a hung loop. Without this, a machine that
+  # stops (crash-loop giveup, host maintenance) can simply stay stopped, which
+  # is how the feed went dark for 19 days in August 2026.
+  policy = "always"
+
 # No [processes] block on purpose.
 #
 # Fly APPENDS a process command to the image's ENTRYPOINT rather than replacing

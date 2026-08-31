@@ -114,10 +114,37 @@ class Scheduler:
         now = _utcnow()
         self.slots = [_Slot(feed=f, next_due=now) for f in registered_feeds()]
 
+    # If the loop makes no progress for this long, the process is hung (a stuck
+    # browser call, a socket that never times out). A hung process looks ALIVE
+    # to Fly, so its restart policy never fires — the exact failure mode that
+    # silently killed the feed on 2026-08-12 for 19 days. Longest legitimate
+    # tick is the ~10-minute public availability sweep; triple it for safety.
+    WATCHDOG_STALL = timedelta(minutes=30)
+
     def run_forever(self) -> None:
         log(step="scheduler", status="started", count=len(self.slots))
         if not self.slots:
             log(step="scheduler", status="idle", reason="no_feeds_registered")
+
+        # Heartbeat for the in-process watchdog. A daemon thread watches it and
+        # hard-exits if the main loop stops progressing; Fly's restart policy
+        # (fly.toml [restart] "always") then brings up a fresh process. os._exit
+        # on purpose: a hung interpreter can't be trusted to unwind cleanly.
+        import os
+        import threading
+
+        self._beat = time.monotonic()
+
+        def _watchdog() -> None:
+            stall_s = self.WATCHDOG_STALL.total_seconds()
+            while True:
+                time.sleep(60)
+                if time.monotonic() - self._beat > stall_s:
+                    log(step="watchdog", status="hung_exit",
+                        stalled_s=int(time.monotonic() - self._beat))
+                    os._exit(1)
+
+        threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
         # Fly sends SIGINT (then SIGTERM) on every deploy and restart. Without
         # this, the interpreter unwinds through time.sleep() and prints a
@@ -141,7 +168,9 @@ class Scheduler:
                 pass
 
         while not stopping:
+            self._beat = time.monotonic()
             self.tick()
+            self._beat = time.monotonic()
             for _ in range(15):
                 if stopping:
                     break

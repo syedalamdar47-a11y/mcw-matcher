@@ -1528,11 +1528,33 @@ function renderCard(c) {
   `;
 }
 
+// A loud, admin-visible notice when live times are down DURING business hours
+// (overnight blanking is by design and gets no banner). The per-card message
+// tells an FDO what to do on this call; this banner tells an admin something is
+// broken and since when — so an outage is a named event, not ambient sadness.
+function outageBannerHtml() {
+  if (!sb || availabilityIsTrustworthy()) return "";
+  if (!(state.role === "owner" || state.role === "admin" || state.role === "full")) return "";
+  const etHour = Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour: "numeric", hour12: false,
+  }).format(new Date()));
+  if (etHour < 7 || etHour >= 20) return "";  // overnight pause, or 6am warm-up
+  const since = state.availabilityHealth && state.availabilityHealth.last_ok_at
+    ? new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit",
+      }).format(new Date(state.availabilityHealth.last_ok_at)) + " ET"
+    : "an unknown time";
+  return `<div class="outage-banner">⚠️ Live appointment times have been down since <b>${escapeHtml(since)}</b>.
+    An alert email has gone to the admin. Until it recovers, confirm times in SimplePractice.</div>`;
+}
+
 // ---------- render: main pane ----------
 function renderMainPane() {
   const filtered = getFiltered();
   return `
     <div class="main-pane">
+      ${outageBannerHtml()}
       <div class="main-bar">
         <div class="main-bar-left">
           <span class="count-text"><strong>${filtered.length}</strong> clinician${filtered.length !== 1 ? "s" : ""}</span>${helpIcon("card-anatomy")}
