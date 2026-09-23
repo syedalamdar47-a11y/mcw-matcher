@@ -142,18 +142,24 @@ def _phone_style(term_digits: str, style: str) -> str:
 def _selftest(cookies, budget, pacer) -> str | None:
     """Does filter[search] find a client by phone, and in which spelling? Uses
     the first roster client with a phone; prints only the outcome."""
-    roster = (_get("clients?" + urlencode({"page[size]": "5", "fields[clients]": "defaultPhoneNumber"}),
-                   cookies, budget, pacer).get("data")) or []
-    probe = next((c for c in roster if len(_digits(_attrs(c).get("defaultPhoneNumber"))) == 10), None)
-    if not probe:
-        out({"selftest": "no_roster_phone"})
-        return None
-    d = _digits(_attrs(probe).get("defaultPhoneNumber"))
-    for style in ("digits", "formatted", "tail7"):
-        hits = _search_clients(_phone_style(d, style), cookies, budget, pacer)
-        if str(probe.get("id")) in {str(c.get("id")) for c in hits}:
-            out({"selftest": "phone", "style": style})
-            return style
+    try:
+        roster = (_get("clients?" + urlencode({"page[size]": "5", "fields[clients]": "defaultPhoneNumber"}),
+                       cookies, budget, pacer).get("data")) or []
+        probe = next((c for c in roster if len(_digits(_attrs(c).get("defaultPhoneNumber"))) == 10), None)
+        if not probe:
+            # Can't prove anything either way — plain digits is the best guess.
+            out({"selftest": "no_roster_phone", "style": "digits"})
+            return "digits"
+        d = _digits(_attrs(probe).get("defaultPhoneNumber"))
+        for style in ("digits", "formatted", "tail7"):
+            hits = _search_clients(_phone_style(d, style), cookies, budget, pacer)
+            if str(probe.get("id")) in {str(c.get("id")) for c in hits}:
+                out({"selftest": "phone", "style": style})
+                return style
+    except UpstreamError as exc:
+        out({"selftest": "error", "detail": safety.scrub_text(str(exc), max_len=40), "style": "digits"})
+        return "digits"
+    # Proven: no spelling of the number finds the client — search by e-mail only.
     out({"selftest": "phone", "style": None})
     return None
 
