@@ -38,7 +38,13 @@ if (-not (Test-Path $EnvFile)) {
 $Wanted = @(
     "SP_SESSION_KEY",
     "SUPABASE_URL",
-    "SUPABASE_SERVICE_KEY"
+    "SUPABASE_SERVICE_KEY",
+    # FDO dashboard project (a different Supabase project from the Matcher one
+    # above): the nightly sp_client_check feed reads HubSpot bookings from it
+    # and writes sp_client_checks back to it. Optional - the feed disables
+    # itself with a log line when these are absent.
+    "FDO_SUPABASE_URL",
+    "FDO_SUPABASE_SERVICE_KEY"
 )
 if ($IncludeSimplePracticeLogin) {
     $Wanted += @("SP_Email", "SP_Password")

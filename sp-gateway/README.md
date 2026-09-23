@@ -173,3 +173,19 @@ There is deliberately **no** generic "fetch any URL" endpoint. Adding a *consume
 (a project that reads our data) is meant to be trivial. Adding a *feed* (new data
 pulled out of SimplePractice) is meant to be a reviewed change. That asymmetry is
 what keeps the answer to "what patient data does this system touch?" answerable.
+
+---
+
+## Feed: `sp_client_check` (nightly, added 2026-09-23)
+
+Checks every HubSpot client booked in the last 120 days against SimplePractice
+(exists? first appointment on/after the booking? attended / no-show / cancelled /
+upcoming?) and upserts one status row per contact into the **FDO dashboard**
+Supabase table `sp_client_checks` (no names, numbers or e-mails). Runs once per
+night between 21:00 and 05:00 ET, when the calendar feed is idle. Needs the Fly
+secrets `FDO_SUPABASE_URL` and `FDO_SUPABASE_SERVICE_KEY` (see
+`deploy/set-secrets.ps1`); without them it logs `fdo_supabase_not_configured`
+once a night and does nothing. Couples are filed under a separate SimplePractice
+couple record that exposes no members, so they read as `not_found` for now.
+Watch `fly logs` for `feed='sp_client_check'` lines: `step='contacts'`,
+`step='totals'`, and the final `status='ok'` with `budget_used`.

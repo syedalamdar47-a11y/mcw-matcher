@@ -99,6 +99,13 @@ class Settings:
     # security, so it belongs in Fly secrets and must never reach a browser.
     supabase_url: str | None = None
     supabase_service_key: Secret | None = None
+    # The FDO dashboard is a DIFFERENT Supabase project from the Matcher one
+    # above. The nightly client-check feed reads HubSpot bookings from it and
+    # writes its results back to it. Optional: when unset the feed disables
+    # itself with a log line rather than failing, so a deploy without these
+    # secrets still runs every other feed.
+    fdo_supabase_url: str | None = None
+    fdo_supabase_service_key: Secret | None = None
     headless: bool = True
     # Hard ceiling on SimplePractice requests PER RUN of a feed. A stop, not a
     # warning. Named per_run rather than daily because that is what it actually
@@ -123,6 +130,8 @@ def load_settings() -> Settings:
         session_key=Secret(_env("SP_SESSION_KEY", default="") or "") or None,
         supabase_url=_env("SUPABASE_URL"),
         supabase_service_key=Secret(_env("SUPABASE_SERVICE_KEY", default="") or "") or None,
+        fdo_supabase_url=_env("FDO_SUPABASE_URL"),
+        fdo_supabase_service_key=Secret(_env("FDO_SUPABASE_SERVICE_KEY", default="") or "") or None,
         headless=(_env("SP_HEADLESS", default="1") or "1") not in ("0", "false", "False"),
         state_dir=Path(_env("SP_STATE_DIR", default=str(GATEWAY_ROOT / "state"))),
     )

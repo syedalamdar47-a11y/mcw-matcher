@@ -16,6 +16,11 @@ Reuses the saved session cookies; never signs in or refreshes the session
 One failed request marks that item "error" and the run continues; only an
 expired session or a safety rail stops it.
 
+The per-client helpers below (_get, _search_clients, _appointments,
+_check_item, ...) are also what the nightly feed src/feeds/client_check.py
+runs, so there is exactly one definition of "matched" and "first appointment".
+Keep them pure: no printing, no session refresh, no scheduling.
+
 Usage (from /app on the gateway machine):
     fly ssh console -C "sh -c 'cat > /tmp/sp-check-input.json'" < sp-check-input.json
     fly ssh console -C "python -u -m src.tools.check_clients /tmp/sp-check-input.json"
@@ -194,7 +199,14 @@ def _load_input(path: str) -> list[dict]:
     return result
 
 
-def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: datetime) -> dict:
+def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: datetime,
+                couple_of: dict[str, str] | None = None) -> dict:
+    """One HubSpot contact -> one result row of counts, dates and vocabulary.
+
+    `couple_of` maps an individual client id to the clientCouples record it
+    sits in (built once per run by the feed; None for the one-off tool). It is
+    consulted only when a matched individual has no sessions of their own.
+    """
     booked = datetime.strptime(it["booked"], "%Y-%m-%d").replace(tzinfo=ET)
     row = {"i": it["i"], "found": 0, "hits": 0, "matched_by": None, "sp_status": None,
            "sp_created": None, "couple": False, "first": None, "first_status": "not_found",
@@ -208,6 +220,13 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
         hits = _search_clients(_phone_style(it["ph"], style), cookies, budget, pacer)
         row["hits"] = len(hits)
         matches = [c for c in hits if _digits(_attrs(c).get("defaultPhoneNumber")) == it["ph"]]
+        if not matches and len(hits) == 1 and style == "digits":
+            # A minor is filed under a parent's number: the search still finds
+            # the record (through its related phones), but the record's own
+            # defaultPhoneNumber differs or is empty. A full 10-digit term that
+            # returns exactly ONE record is that record, not fuzzy noise. This
+            # was the first run's blind spot, confirmed by hand afterwards.
+            matches = list(hits)
         matched_by = "phone" if matches else None
     if not matches and it["em"]:
         hits = _search_clients(it["em"], cookies, budget, pacer)
@@ -238,12 +257,26 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
     # 2. First appointment on/after the booking, across the matched clients
     #    (a parent's number may book for two children).
     appts: list[tuple[datetime, str]] = []
-    for c in matches:
-        for a in _appointments(str(c["id"]), booked, cookies, budget, pacer):
+
+    def _collect(client_id: str) -> None:
+        for a in _appointments(client_id, booked, cookies, budget, pacer):
             at = _attrs(a)
             dt = _parse_dt(at.get("startTime"))
             if dt and dt >= booked:   # belt-and-braces on the server's timeRange
                 appts.append((dt, STATUS.get(str(at.get("attendanceStatus")), "unknown_status")))
+
+    ids = [str(c["id"]) for c in matches]
+    for cid in ids:
+        _collect(cid)
+    # 2b. Couples therapy is booked on a separate clientCouples record that the
+    #     client search never returns and that OWNS the sessions. A matched
+    #     individual with no sessions of their own but a seat in a couple gets
+    #     the couple's sessions. The match itself (phone / e-mail) stands.
+    if not appts and couple_of:
+        couples = sorted({couple_of[cid] for cid in ids if cid in couple_of})
+        for kid in couples:
+            _collect(kid)
+        row["couple"] = row["couple"] or bool(couples)
     appts.sort(key=lambda x: x[0])
     row["appts"] = len(appts)
     if not appts:

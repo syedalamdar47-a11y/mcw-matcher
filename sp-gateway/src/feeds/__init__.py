@@ -16,5 +16,6 @@ AVAILABILITY SOURCE — one owner at a time:
 
 from . import calendar  # noqa: F401  authed calendar — primary availability source
 # from . import availability  # noqa: F401  public fallback — enable if calendar is offline
+from . import client_check  # noqa: F401  nightly HubSpot-vs-SimplePractice check → FDO dashboard
 
-__all__ = ["calendar"]
+__all__ = ["calendar", "client_check"]

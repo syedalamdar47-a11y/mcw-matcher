@@ -17,15 +17,33 @@ without provisioning anything.
 from __future__ import annotations
 
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
-from .config import Settings
-from .safety import log
+from .config import ALLOWED_HOSTS, Secret, Settings
+from .safety import SafetyViolation, log
 
 
 class Sink:
-    def __init__(self, settings: Settings) -> None:
-        self._url = settings.supabase_url
-        self._key = settings.supabase_service_key
+    def __init__(self, settings: Settings, *, url: str | None = None,
+                 key: Secret | None = None) -> None:
+        # Default target is the Matcher project (settings.supabase_*). A feed
+        # whose data lives in ANOTHER Supabase project — the FDO dashboard, for
+        # the client check — passes that project's url/key explicitly and gets
+        # the same headers, paging and upsert semantics. Both or neither: a
+        # url from one project with the key of another is a silent 401 at best.
+        if (url is None) != (key is None):
+            raise ValueError("Sink override needs both url and key")
+        self._url = url or settings.supabase_url
+        self._key = key or settings.supabase_service_key
+        # Structural, not aspirational: a sink writes to Supabase and nowhere
+        # else. If a URL ever named a SimplePractice host — a pasted secret, a
+        # typo in .env.local — the service key and a POST would go there,
+        # around every rail in safety.py. Refuse before any socket is opened.
+        host = (urlparse(self._url).hostname or "").lower() if self._url else ""
+        if host in ALLOWED_HOSTS:
+            raise SafetyViolation(
+                f"Refusing to use SimplePractice host {host!r} as a Supabase sink"
+            )
         self._local_dir = settings.state_dir / "output"
 
     @property
@@ -70,6 +88,49 @@ class Sink:
             )
         log(step="sink", status="ok", rows=len(rows))
         return len(rows)
+
+    def select(self, table: str, *, params: dict[str, str], page_size: int = 1000,
+               max_pages: int = 50) -> list[dict[str, Any]]:
+        """Paged PostgREST read (Range header, `page_size` rows per page).
+
+        Raises on any HTTP problem. That is the opposite of fetch_existing_slots,
+        and deliberately so: there, "not knowing" only costs a few extra
+        refreshes, whereas a feed that quietly received an empty input list
+        would check nobody and then report itself healthy. `max_pages` is a
+        hard stop so a misbehaving endpoint cannot page forever.
+        """
+        if not self.configured:
+            raise RuntimeError("Supabase is not configured for this sink")
+        import httpx
+
+        headers = {
+            "apikey": self._key.reveal(),
+            "Authorization": f"Bearer {self._key.reveal()}",
+            "Range-Unit": "items",
+        }
+        out: list[dict[str, Any]] = []
+        with httpx.Client(timeout=30) as client:
+            for page in range(max_pages):
+                lo = page * page_size
+                resp = client.get(
+                    f"{self._url.rstrip('/')}/rest/v1/{table}",
+                    params=params,
+                    headers={**headers, "Range": f"{lo}-{lo + page_size - 1}"},
+                )
+                if resp.status_code == 416:      # range past the end: no more rows
+                    break
+                if resp.status_code >= 300:
+                    # Body may quote a row, so it is never logged.
+                    raise RuntimeError(
+                        f"Supabase read from {table} failed with HTTP {resp.status_code}"
+                    )
+                batch = resp.json()
+                if not isinstance(batch, list):
+                    raise RuntimeError(f"Supabase read from {table} returned a non-list")
+                out.extend(batch)
+                if len(batch) < page_size:
+                    break
+        return out
 
     def fetch_existing_slots(self) -> dict[str, dict[str, Any]]:
         """What we already know, so we only re-fetch what actually needs it.
