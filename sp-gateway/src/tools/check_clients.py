@@ -118,6 +118,59 @@ def _search_clients(term: str, cookies, budget, pacer) -> list[dict]:
     return (_get(qs, cookies, budget, pacer).get("data")) or []
 
 
+def _strings_of(v, depth: int = 0):
+    """Every string inside a JSON value — in-memory matching only, never printed."""
+    if depth > 5:
+        return
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings_of(x, depth + 1)
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _strings_of(x, depth + 1)
+
+
+def _search_couples(term: str, cookies, budget, pacer) -> list[dict]:
+    """Couples therapy is filed under a clientCouples record that /clients never
+    returns. SimplePractice's own top-bar search (utility-bar/client-search)
+    queries base-clients with thisType Client,ClientCouple; so do we, and keep
+    only the couple records. Verified 2026-09-24: all 6 September couples the
+    individual search missed come back, by name and by phone."""
+    qs = "base-clients?" + urlencode({
+        "filter[search]": term,
+        "filter[thisType]": "Client,ClientCouple",
+        "filter[includePartial]": "true",
+        "page[size]": str(SEARCH_PAGE),
+    })
+    data = (_get(qs, cookies, budget, pacer).get("data")) or []
+    return [c for c in data if isinstance(c, dict) and c.get("type") == "clientCouples"]
+
+
+def _match_couple(it: dict, cookies, budget, pacer) -> list[dict]:
+    """A couple record for this HubSpot contact: by the phone digits (the record
+    carries the number, or is the single couple a full 10-digit search returns),
+    then by first + last name (both must appear in the couple's record)."""
+    ph = it.get("ph") or ""
+    if len(ph) == 10:
+        hits = _search_couples(ph, cookies, budget, pacer)
+        carrying = [c for c in hits if ph in {_digits(s) for s in _strings_of(c.get("attributes"))}]
+        if carrying or len(hits) == 1:
+            return carrying or hits
+    first, last = _fold(it.get("first")), _fold(it.get("last"))
+    if first and last:
+        term = f"{str(it.get('first') or '').strip()} {str(it.get('last') or '').strip()}"
+        hits = _search_couples(term, cookies, budget, pacer)
+        named = []
+        for c in hits:
+            folded = " ".join(_fold(s) for s in _strings_of(c.get("attributes")))
+            if first in folded and last in folded:
+                named.append(c)
+        return named
+    return []
+
+
 def _appointments(client_id: str, booked: datetime, cookies, budget, pacer) -> list[dict]:
     qs = "appointments?" + urlencode({
         "filter[clientId]": client_id,
@@ -258,6 +311,11 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
                    if (_fold(_attrs(c).get("firstName")) == first and _fold(_attrs(c).get("lastName")) == last)
                    or _fold(_attrs(c).get("preferredName")) == first + last]
         matched_by = "name" if matches else None
+    if not matches:
+        # Last of all, a couples record (see _search_couples). Its sessions are
+        # listed by filter[clientId]=<couple id> like any client's.
+        matches = _match_couple(it, cookies, budget, pacer)
+        matched_by = "couple" if matches else None
     matches = [c for c in matches if _ID_RE.fullmatch(str(c.get("id") or ""))]
     row["couple"] = any((c.get("type") or "clients") != "clients" for c in matches)
     # A new booking creates a client record near the booking date: when a
