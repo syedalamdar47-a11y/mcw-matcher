@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -48,6 +49,7 @@ MAX_MATCHES = 3          # family members share a number; look at a few, never a
 SEARCH_PAGE = 10         # fuzzy search may return more than the exact match
 LOOKAHEAD_DAYS = 120     # how far past the booking date a "first appointment" may sit
 CLIENT_FIELDS = "status,createdAt,defaultPhoneNumber,defaultEmailAddress"
+NAME_FIELDS = CLIENT_FIELDS + ",firstName,lastName,preferredName"
 
 # SimplePractice attendanceStatus -> our fixed vocabulary. Anything else is
 # reported as unknown_status rather than echoed.
@@ -75,6 +77,12 @@ class BadInput(RuntimeError):
 
 def out(obj) -> None:
     print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+
+def _fold(s) -> str:
+    """Name comparison key: accents stripped, letters only, lower-case."""
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z]", "", s.lower())
 
 
 def _digits(v) -> str:
@@ -233,6 +241,23 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
         row["hits"] = max(row["hits"], len(hits))
         matches = [c for c in hits if str(_attrs(c).get("defaultEmailAddress") or "").strip().lower() == it["em"]]
         matched_by = "email" if matches else None
+    first, last = _fold(it.get("first")), _fold(it.get("last"))
+    if not matches and first and last:
+        # Last resort: the exact first + last name. SimplePractice often holds
+        # a different number or e-mail than HubSpot (the client's own mobile vs
+        # the number they called from); on 2026-09-24 this found 6 of 16
+        # "missing" clients. Both names must match exactly — a surname alone
+        # never counts.
+        qs = "clients?" + urlencode({
+            "filter[search]": f"{str(it.get('first') or '').strip()} {str(it.get('last') or '').strip()}",
+            "fields[clients]": NAME_FIELDS,
+            "page[size]": str(SEARCH_PAGE),
+        })
+        hits = (_get(qs, cookies, budget, pacer).get("data")) or []
+        matches = [c for c in hits
+                   if (_fold(_attrs(c).get("firstName")) == first and _fold(_attrs(c).get("lastName")) == last)
+                   or _fold(_attrs(c).get("preferredName")) == first + last]
+        matched_by = "name" if matches else None
     matches = [c for c in matches if _ID_RE.fullmatch(str(c.get("id") or ""))]
     row["couple"] = any((c.get("type") or "clients") != "clients" for c in matches)
     # A new booking creates a client record near the booking date: when a

@@ -73,6 +73,7 @@ COUPLE_MAP_ENABLED = False
 COUPLE_LOOKUP_CAP = 80        # couple records fetched per run (+ up to 2 member lookups each)
 COUPLE_CHUNK_DAYS = 60        # appointments are pulled in chunks this wide to build the couple map
 RUN_DEADLINE = timedelta(minutes=22)   # stop starting new clients; the watchdog fires at 30
+RECENT_DAYS = 45              # checked first every night, before the rotating older tail
 MAX_CONSECUTIVE_ERRORS = 8    # this many clients failing in a row is an outage, not bad data
 SEARCH_STYLE = "digits"       # phone search spelling, proven by the one-off tool's self-test
 
@@ -149,7 +150,7 @@ def _load_contacts(fdo, since: date) -> tuple[list[dict], int]:
     upsert make PostgREST reject the whole batch.
     """
     raw = fdo.select(INPUT_TABLE, params={
-        "select": "hubspot_contact_id,phone_normalized,email,date_booked",
+        "select": "hubspot_contact_id,phone_normalized,email,first_name,last_name,date_booked",
         "client_status": "eq.Booked",
         "date_booked": f"gte.{since.isoformat()}",
         "order": "hubspot_contact_id",
@@ -168,6 +169,10 @@ def _load_contacts(fdo, since: date) -> tuple[list[dict], int]:
             "i": cid,
             "ph": _digits(r.get("phone_normalized")),          # 10 digits, or "" -> e-mail only
             "em": str(r.get("email") or "").strip().lower(),
+            # Name fallback (exact first + last) when phone and e-mail miss;
+            # held in memory only, like the number and e-mail.
+            "first": str(r.get("first_name") or "").strip(),
+            "last": str(r.get("last_name") or "").strip(),
             "booked": booked,
         })
     return items, skipped
@@ -329,11 +334,18 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
         log(feed=HEALTH_FEED, step="contacts", status="skipped_rows", count=skipped)
     if not items:
         return 0
-    # Rotate the starting point nightly. Order does not matter for the result
-    # (rows are keyed by contact id), but if RUN_DEADLINE ever truncates a run
-    # it must not be the same tail that goes unchecked every night.
-    k = _night_of(now_et).toordinal() % len(items)
-    items = items[k:] + items[:k]
+    # Bookings from the last RECENT_DAYS go first, every night: they are what
+    # the scorecard shows and what changes (first sessions happen). The older
+    # tail is rotated nightly so that, when RUN_DEADLINE truncates the run
+    # (690 contacts took ~30 min on 2026-09-24), it is never the same clients
+    # that go unchecked.
+    cutoff = (now_et.date() - timedelta(days=RECENT_DAYS)).isoformat()
+    recent = [it for it in items if it["booked"] >= cutoff]
+    older = [it for it in items if it["booked"] < cutoff]
+    if older:
+        k = _night_of(now_et).toordinal() % len(older)
+        older = older[k:] + older[:k]
+    items = recent + older
 
     # The scheduler hands every feed the same per-run ceiling. This one's work
     # is proportional to the contact list (≤5 requests each) plus the couple

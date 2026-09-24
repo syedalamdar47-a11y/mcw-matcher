@@ -21,22 +21,16 @@ import json
 import os
 import re
 import sys
-import unicodedata
 from collections import Counter
 from datetime import datetime
 from urllib.parse import urlencode
 
 from .. import config, safety, session
 from .check_clients import (
-    ET, STATUS, SessionExpired, UpstreamError, _appointments, _attrs, _digits, _get, _ID_RE, _parse_dt, out,
+    ET, STATUS, SessionExpired, UpstreamError, _appointments, _attrs, _digits, _fold, _get, _ID_RE, _parse_dt, out,
 )
 
 FIELDS = "status,createdAt,defaultPhoneNumber,firstName,lastName,preferredName"
-
-
-def _fold(s) -> str:
-    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z]", "", s.lower())
 
 
 def _search(term: str, cookies, budget, pacer) -> list[dict]:
