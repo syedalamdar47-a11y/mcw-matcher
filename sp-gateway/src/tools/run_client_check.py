@@ -8,11 +8,14 @@ sp_client_checks table. Differences, on purpose:
     untouched (it still runs tonight);
   * --days N limits it to bookings from the last N days (default 30, which is
     ~150 clients and ~5-8 minutes), so a daytime run stays short;
-  * it NEVER signs in: the daytime calendar feed keeps the session fresh, and a
-    second process must not race it for a sign-in. If the session has lapsed
-    the run stops with exit 3 and the scheduler refreshes it on its next tick.
+  * by default it does not sign in: if the session has lapsed the run stops
+    with exit 3 and the scheduler renews it in business hours. With --signin
+    it renews the gateway's one session itself through src/tools/on_demand.py
+    (the scheduler's own sign-in, under the session lock, 2-failure ceiling,
+    at most once every 30 minutes) — so a check can run at any hour.
 
     fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.run_client_check --days 30"
+    fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.run_client_check --days 30 --signin"
 
 Prints only the feed's scrubbed log lines (counts, never names or numbers).
 Exit codes: 0 ok · 1 error · 2 not configured · 3 session expired.
@@ -27,11 +30,14 @@ from .. import config, safety, session
 from ..feeds import client_check as cc
 from ..sink import Sink
 from .check_clients import SessionExpired
+from .on_demand import refresh_on_demand
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="run_client_check")
     ap.add_argument("--days", type=int, default=30, help="bookings from the last N days (1-120)")
+    ap.add_argument("--signin", action="store_true",
+                    help="if the session has expired, renew it now (gateway's own sign-in; at most once per 30 min)")
     args = ap.parse_args(argv)
     days = max(1, min(120, args.days))
 
@@ -40,9 +46,14 @@ def main(argv: list[str]) -> int:
         print("FDO_SUPABASE_URL / FDO_SUPABASE_SERVICE_KEY not set — nothing to do")
         return 2
 
-    # No sign-in from this process, ever: make the feed's one re-auth a no-op
-    # so an expired session surfaces as SessionExpired instead.
-    session.refresh_session = lambda _settings: False  # type: ignore[assignment]
+    if args.signin:
+        # The feed's one re-auth goes through the guarded on-demand path
+        # (session lock, 2-failure ceiling, 30-minute cooldown).
+        session.refresh_session = refresh_on_demand  # type: ignore[assignment]
+    else:
+        # Default: no sign-in from this process — an expired session surfaces
+        # as SessionExpired (exit 3) and the scheduler renews it.
+        session.refresh_session = lambda _settings: False  # type: ignore[assignment]
     cc.BOOKED_WINDOW_DAYS = days
     cc.RECENT_DAYS = days
 

@@ -23,10 +23,16 @@ OUTPUT: one JSON line per caller keyed by k = the Aircall call id of their
 first answered New Client call (an Aircall record id, like the HubSpot ids we
 print elsewhere) — never a name, a number, an e-mail, a SimplePractice id, or a
 hash of a phone number (a 10-digit number's hash can be reversed in seconds). Read-only GETs via
-check_clients' _get (host allow-list, no redirects, budget, pacing). Never signs
-in (exit 3 if the session has expired).
+check_clients' _get (host allow-list, no redirects, budget, pacing). Does not
+sign in (exit 3 if the session has expired) unless run with --signin, which
+renews the gateway's one session via src/tools/on_demand.py (guarded, at most
+once per 30 minutes).
 
     fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.check_callers 2026-09-01 2026-09-30"
+    ... --write   also saves the results to the FDO dashboard's sp_caller_checks
+                  table (one row per answered New Client call id; call ids,
+                  dates and statuses only — no names or numbers), which the
+                  Front Office Scorecard shows as "checked in SimplePractice".
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from urllib.parse import urlencode
 
 from .. import config, safety, session
 from ..sink import Sink
+from .on_demand import refresh_on_demand
 from .check_clients import (
     ET, NAME_FIELDS, SEARCH_PAGE, STATUS, SessionExpired, UpstreamError, _appointments, _attrs, _digits, _fold, _get,
     _ID_RE, _match_couple, _parse_dt, _search_clients, out,
@@ -45,6 +52,11 @@ from .check_clients import (
 
 NEW_CLIENT_BRANCHES = ("New Client", "New Client Psychiatry", "New Client Sarasota", "New Client Tampa")
 MAX_CALLERS = 600
+OUTPUT_TABLE = "sp_caller_checks"
+FIRST_STATUS = frozenset({"attended", "no_show", "cancelled", "late_cancelled", "clinician_cancelled",
+                          "upcoming", "no_appointment", "not_found", "error"})
+MATCHED_BY = frozenset({"phone", "name", "couple"})
+SP_STATUS = frozenset({"active", "inactive", "prospective", "other"})
 
 
 def _load_callers(settings, start: date, end: date) -> list[dict]:
@@ -70,8 +82,10 @@ def _load_callers(settings, start: date, end: date) -> list[dict]:
         if not dt:
             continue
         day = dt.astimezone(ET).date()
-        c = callers.setdefault(d, {"d": d, "first": day, "first_dt": dt, "cid": r.get("aircall_call_id"), "calls": 0, "names": []})
+        c = callers.setdefault(d, {"d": d, "first": day, "first_dt": dt, "cid": r.get("aircall_call_id"), "calls": 0, "names": [], "ids": []})
         c["calls"] += 1
+        if str(r.get("aircall_call_id") or "").isdigit() and int(r["aircall_call_id"]) not in c["ids"]:
+            c["ids"].append(int(r["aircall_call_id"]))
         if dt < c["first_dt"]:
             c["first"], c["first_dt"], c["cid"] = day, dt, r.get("aircall_call_id")
         nm = (str(r.get("contact_first_name") or "").strip(), str(r.get("contact_last_name") or "").strip())
@@ -152,6 +166,9 @@ def main(argv: list[str]) -> int:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)      # request URLs carry numbers and names
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    allow_signin = "--signin" in argv
+    write = "--write" in argv
+    argv = [a for a in argv if a not in ("--signin", "--write")]
     if len(argv) != 2:
         print("usage: python -m src.tools.check_callers <from YYYY-MM-DD> <to YYYY-MM-DD>")
         return 2
@@ -168,9 +185,20 @@ def main(argv: list[str]) -> int:
         print("FDO_SUPABASE_URL / FDO_SUPABASE_SERVICE_KEY not set")
         return 2
     cookies = session.cookies_from_state(settings)
-    if not cookies:
-        print("no saved session — stopping (this tool never signs in)")
-        return 2
+    probe_budget = safety.RequestBudget(limit=2)
+    probe_pacer = safety.Pacer(settings.min_delay_s, settings.max_delay_s)
+    try:
+        if not cookies:
+            raise SessionExpired("no saved session")
+        _get("clients?" + urlencode({"page[size]": "1", "fields[clients]": "status"}), cookies, probe_budget, probe_pacer)
+    except SessionExpired:
+        # Renew only when asked (--signin): the gateway's own guarded sign-in,
+        # at most once per 30 minutes. Otherwise stop and let the scheduler do it.
+        if not (allow_signin and refresh_on_demand(settings)):
+            raise
+        cookies = session.cookies_from_state(settings)
+        if not cookies:
+            raise
     callers = _load_callers(settings, start, end)
     out({"callers": len(callers), "calls": sum(c["calls"] for c in callers)})
     budget = safety.RequestBudget(limit=8 * len(callers) + 20)
@@ -178,6 +206,8 @@ def main(argv: list[str]) -> int:
     now = datetime.now(ET)
     totals: Counter = Counter()
     errors: Counter = Counter()
+    stamp = datetime.now(ET).astimezone().isoformat()
+    table_rows: list[dict] = []
     for c in callers:
         try:
             row = _check(c, cookies, budget, pacer, now)
@@ -188,7 +218,26 @@ def main(argv: list[str]) -> int:
             errors[type(exc).__name__] += 1
         totals[f"{row.get('matched_by') or 'none'}:{row['first_status']}"] += 1
         out(row)
+        for cid in c["ids"]:
+            table_rows.append({
+                "aircall_call_id": cid,
+                "first_call": row["first_call"],
+                "checked_at": stamp,
+                "found": int(row.get("found") or 0),
+                "matched_by": row.get("matched_by") if row.get("matched_by") in MATCHED_BY else None,
+                "created_rel_days": row.get("created_rel_days") if isinstance(row.get("created_rel_days"), int) else None,
+                "sp_status": row.get("sp_status") if row.get("sp_status") in SP_STATUS else None,
+                "first_appointment": row.get("first"),
+                "first_status": row["first_status"] if row["first_status"] in FIRST_STATUS else "error",
+                "appointments": int(row.get("appts") or 0),
+                "source": "gateway",
+            })
     out({"totals": dict(totals), "errors": dict(errors), "requests": budget.used})
+    if write and table_rows:
+        fdo = Sink(settings, url=settings.fdo_supabase_url, key=settings.fdo_supabase_service_key)
+        for i in range(0, len(table_rows), 200):
+            fdo.upsert(OUTPUT_TABLE, table_rows[i:i + 200], on_conflict="aircall_call_id")
+        out({"written": len(table_rows), "table": OUTPUT_TABLE})
     return 0
 
 
