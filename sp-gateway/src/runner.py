@@ -36,6 +36,7 @@ from .safety import (
     Pacer,
     RequestBudget,
     SafetyViolation,
+    SessionBusy,
     log,
     log_exception,
 )
@@ -96,6 +97,8 @@ class _Slot:
     # After repeated failures we stop trying rather than hammer SimplePractice.
     # A tripped breaker is a loud, visible state — not a silent retreat.
     breaker_open_until: datetime | None = None
+    # First tick this slot found the session lock held (None = not busy).
+    busy_since: datetime | None = None
 
 
 class Scheduler:
@@ -194,6 +197,7 @@ class Scheduler:
             rows = _execute(slot.feed, self.settings, budget, pacer)
             slot.consecutive_failures = 0
             slot.breaker_open_until = None
+            slot.busy_since = None
             log(
                 feed=slot.feed.name,
                 status="ok",
@@ -201,12 +205,25 @@ class Scheduler:
                 budget_used=budget.used,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+        except SessionBusy:
+            # Another process (e.g. a run-now tool) is signing in right now. Not
+            # a rail firing: try again next tick, when it has saved a fresh
+            # session — never open the one-hour breaker for this. A lock held
+            # for more than 10 minutes is reported loudly (a hung holder); the
+            # lock itself treats a dead or 30-minute-old holder as stale.
+            if slot.busy_since is None:
+                slot.busy_since = now
+            held = now - slot.busy_since
+            log(feed=slot.feed.name, status="busy_long" if held > timedelta(minutes=10) else "busy",
+                reason="session_lock_held", value=int(held.total_seconds() // 60), unit="minutes")
         except SafetyViolation as exc:
             # A safety rail fired. This is never retried away — it means the
             # code tried to do something it promised not to.
+            slot.busy_since = None
             slot.breaker_open_until = now + self.BREAKER_COOLDOWN
             log_exception(exc, feed=slot.feed.name, status="halted")
         except Exception as exc:  # noqa: BLE001 - we log a scrubbed summary, never a traceback
+            slot.busy_since = None
             slot.consecutive_failures += 1
             log_exception(
                 exc,

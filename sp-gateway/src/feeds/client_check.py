@@ -106,6 +106,10 @@ _last_completed_night: date | None = None
 MAX_ATTEMPTS_PER_NIGHT = 3
 _attempt_night: date | None = None
 _attempts_tonight = 0
+# The night (and monotonic time) of the last run that actually SUCCEEDED — the
+# nightly caller check (caller_check.py) runs only after this, in a later tick.
+_last_ok_night: date | None = None
+_last_ok_monotonic = 0.0
 
 
 def _now_et() -> datetime:
@@ -286,7 +290,7 @@ def _table_row(it: dict, row: dict, stamp: str) -> dict[str, Any]:
 
 @feed(HEALTH_FEED, kind="authed_http", every=timedelta(minutes=30))
 def sp_client_check(settings=None, budget: RequestBudget = None, pacer: Pacer = None) -> int:
-    global _last_completed_night, _attempt_night, _attempts_tonight
+    global _last_completed_night, _attempt_night, _attempts_tonight, _last_ok_night, _last_ok_monotonic
     from ..config import load_settings
     from ..sink import Sink
 
@@ -321,6 +325,7 @@ def sp_client_check(settings=None, budget: RequestBudget = None, pacer: Pacer = 
         raise
     matcher.record_health(HEALTH_FEED, ok=True, rows=rows)
     _last_completed_night = night
+    _last_ok_night, _last_ok_monotonic = night, time.monotonic()
     return rows
 
 
@@ -354,11 +359,14 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
     budget.limit = max(budget.limit, 5 * len(items) + 200)
 
     cookies = cookies_from_state(settings)
+    refreshed = False
     if not cookies:
+        # This IS the run's one re-auth: a second expiry later in the run is
+        # surfaced, never signed in through again.
+        refreshed = True
         if not refresh_session(settings):
             raise RuntimeError("no SimplePractice session available")
         cookies = cookies_from_state(settings)
-    refreshed = False
 
     def with_refresh(fn: Callable[[dict], Any]):
         # Same shape as the calendar feed's _with_refresh, but at most ONE

@@ -15,7 +15,9 @@ sp_client_checks table. Differences, on purpose:
     at most once every 30 minutes) — so a check can run at any hour.
 
     fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.run_client_check --days 30"
-    fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.run_client_check --days 30 --signin"
+    fly ssh console --app mcw-sp-gateway -u gateway -C "python -u -m src.tools.run_client_check --days 30 --signin"
+    (--signin must run as the gateway user: -u gateway. As root it is refused,
+    because files a root sign-in writes would be unreadable to the scheduler.)
 
 Prints only the feed's scrubbed log lines (counts, never names or numbers).
 Exit codes: 0 ok · 1 error · 2 not configured · 3 session expired.
@@ -67,19 +69,31 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    signin = "--signin" in sys.argv[1:]
+    expired_msg = (
+        "SESSION EXPIRED — the on-demand sign-in did not run; see the on_demand_signin log line "
+        "(cooldown / busy / locked_needs_human / not_on_gateway)"
+        if signin
+        else "SESSION EXPIRED — stopping; the scheduler renews it in business hours (or re-run with --signin)"
+    )
     code = 1
     try:
         code = main(sys.argv[1:])
     except SessionExpired:
-        print("SESSION EXPIRED — stopping; the scheduler will refresh it within a minute or two")
+        print(expired_msg)
         code = 3
+    except safety.SafetyViolation as exc:   # before RuntimeError: it is one
+        print("stopped:", safety.scrub_text(str(exc)))
+        code = 1
     except RuntimeError as exc:
         # The feed raises RuntimeError("no SimplePractice session available")
         # when cookies are missing and refresh is refused.
-        print("stopped:", safety.scrub_text(str(exc)))
-        code = 3 if "session" in str(exc).lower() else 1
-    except safety.SafetyViolation as exc:
-        print("stopped:", safety.scrub_text(str(exc)))
+        if "session" in str(exc).lower():
+            print(expired_msg)
+            code = 3
+        else:
+            print("stopped:", safety.scrub_text(str(exc)))
+            code = 1
     except BaseException as exc:  # noqa: BLE001 — never a traceback
         print(f"stopped: {type(exc).__name__}")
     sys.exit(code)

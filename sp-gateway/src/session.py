@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -34,6 +35,7 @@ from .safety import (
     Pacer,
     RequestBudget,
     SafetyViolation,
+    SessionBusy,
     assert_read_only,
     log,
 )
@@ -46,8 +48,12 @@ LOGIN_FAIL_FILENAME = "login-failures"
 # lockout. A bad/rotated password, or a Sift device challenge, would otherwise
 # make the feed retry a sign-in every cycle and march the account into a real
 # lockout that also takes down billing work. This counter persists across cycles
-# AND process restarts; a human clears it (delete the file, or a successful
-# check_login.py --signin) once the underlying issue is resolved.
+# AND process restarts. Every submitted password is counted BEFORE it is sent;
+# only a confirmed sign-in clears it. At the ceiling nothing signs in until a
+# human reads the biller inbox, then deletes the file and runs one sign-in —
+# BOTH as the gateway user (as root the files end up unreadable to the scheduler):
+#   fly ssh console -a mcw-sp-gateway -u gateway -C "rm /data/login-failures"
+#   fly ssh console -a mcw-sp-gateway -u gateway -C "python check_login.py --signin"
 MAX_LOGIN_FAILURES = 2
 
 
@@ -55,25 +61,38 @@ def _login_fail_path(settings: Settings) -> Path:
     return settings.state_dir / LOGIN_FAIL_FILENAME
 
 
+def login_failure_count(settings: Settings) -> int:
+    """Consecutive failed sign-ins on record. Fails CLOSED: a counter file that
+    exists but can't be read or parsed counts as the ceiling."""
+    try:
+        raw = _login_fail_path(settings).read_text()
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return MAX_LOGIN_FAILURES
+    try:
+        # An empty file only happens if a write was cut short — fail closed.
+        return int(raw.strip())
+    except ValueError:
+        return MAX_LOGIN_FAILURES
+
+
 def login_locked(settings: Settings) -> bool:
     """True once we've hit the consecutive-failure ceiling. Refuse to sign in."""
-    try:
-        return int((_login_fail_path(settings).read_text() or "0").strip()) >= MAX_LOGIN_FAILURES
-    except Exception:
-        return False
+    return login_failure_count(settings) >= MAX_LOGIN_FAILURES
 
 
-def _bump_login_failure(settings: Settings) -> None:
+def _bump_login_failure(settings: Settings) -> bool:
+    """Add one to the failure counter. True only when the new value is on disk —
+    sign_in refuses to submit a password it could not count."""
     try:
         p = _login_fail_path(settings)
-        try:
-            n = int((p.read_text() or "0").strip())
-        except Exception:
-            n = 0
+        n = login_failure_count(settings)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(str(n + 1))
+        return login_failure_count(settings) == n + 1
     except Exception:
-        pass
+        return False
 
 
 def clear_login_failures(settings: Settings) -> None:
@@ -183,24 +202,88 @@ def clear_stale_lock_at_boot(settings: Settings) -> None:
         log(step="startup", status="stale_lock_not_cleared")
 
 
+# A sign-in takes a minute or two. A lock older than this belongs to a process
+# that hung or died without cleaning up.
+LOCK_STALE_AFTER_S = 30 * 60
+
+
+def _lock_is_stale(lock_path: Path) -> bool:
+    """True when the lock file's holder is gone (or has held it absurdly long)."""
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    if age > LOCK_STALE_AFTER_S:
+        return True
+    if os.name == "posix":          # os.kill(pid, 0) would TERMINATE a process on Windows
+        try:
+            pid = int(lock_path.read_text().strip())
+        except (OSError, ValueError):
+            return False            # can't tell yet: treat as held
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True             # the holder is dead (killed tool, dropped ssh)
+        except OSError:
+            return False            # alive, e.g. owned by another user
+        return False
+    return False
+
+
 @contextmanager
 def exclusive_session_lock(settings: Settings) -> Iterator[None]:
+    """One process at a time may drive a SimplePractice sign-in.
+
+    An O_EXCL lock file that is DELETED after use, so no long-lived file can end
+    up owned by the wrong user (run-now tools connect over ssh as root; the
+    scheduler runs as `gateway`). A lock whose holder died — a killed tool, a
+    dropped ssh session — or that is older than LOCK_STALE_AFTER_S is cleared
+    and taken over once. A held lock raises SessionBusy (a SafetyViolation the
+    scheduler retries on its next tick instead of opening its breaker).
+    """
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = settings.state_dir / LOCK_FILENAME
+    fd = None
+    for attempt in (1, 2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError as exc:
+            if attempt == 1:
+                try:
+                    seen = lock_path.stat()
+                except FileNotFoundError:
+                    continue            # released meanwhile: just try again
+                if _lock_is_stale(lock_path):
+                    # Remove it only if it is still the SAME stale file — never
+                    # a lock another contender took over a moment ago.
+                    try:
+                        now_st = lock_path.stat()
+                        if (now_st.st_ino, now_st.st_mtime_ns) == (seen.st_ino, seen.st_mtime_ns):
+                            lock_path.unlink()
+                            log(step="session_lock", status="cleared_stale")
+                    except OSError:
+                        pass
+                    continue
+            raise SessionBusy(
+                f"Another gateway process holds the SimplePractice session ({lock_path}). "
+                "Only one may sign in at a time."
+            ) from exc
+    me = str(os.getpid())
     try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise SafetyViolation(
-            f"Another gateway process holds the SimplePractice session "
-            f"({lock_path}). Only one may run at a time. If no process is "
-            "running, delete that file."
-        ) from exc
-    try:
-        os.write(fd, str(os.getpid()).encode())
+        os.write(fd, me.encode())
         os.close(fd)
         yield
     finally:
-        lock_path.unlink(missing_ok=True)
+        # Release only OUR lock: if ours was judged stale and taken over, the
+        # file now belongs to someone else and must stay.
+        try:
+            if lock_path.read_text().strip() == me:
+                lock_path.unlink()
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -386,12 +469,25 @@ def refresh_session(settings: Settings) -> bool:
     with exclusive_session_lock(settings):
         with browser_context(settings, budget, pacer) as ctx:
             if is_signed_in(ctx):
-                clear_login_failures(settings)  # session is healthy — reset the ceiling
+                # The session is healthy. Below the ceiling the counter can be
+                # reset (and the reset is logged); AT the ceiling only a person
+                # (or a real, confirmed sign-in) may clear it — a live cookie
+                # does not reset SimplePractice's own failure count.
+                n = login_failure_count(settings)
+                if 0 < n < MAX_LOGIN_FAILURES:
+                    clear_login_failures(settings)
+                    log(step="login_failures", status="cleared", value=n)
                 save_state(settings, ctx.storage_state())  # refresh cookie expiry
                 return True
             if sign_in(ctx, settings, guard):
                 return True
     return False
+
+
+# An alias nothing monkeypatches: the run-now tools replace
+# session.refresh_session in-process, and the on-demand path must still reach
+# the real implementation regardless of import order.
+_refresh_session_impl = refresh_session
 
 
 def is_signed_in(context) -> bool:
@@ -463,6 +559,15 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
         pwd.fill(settings.sp_password.reveal())
 
         submit = page.locator("#submitBtn, input[name='commit']").first
+        # Count the attempt BEFORE the password leaves the browser: a timeout,
+        # crash or kill after this point must still count toward the ceiling
+        # (SimplePractice has already seen the attempt). Only a confirmed
+        # success below clears it.
+        if not _bump_login_failure(settings):
+            # The counter is the hard rail against SimplePractice's account
+            # lockout: never send a password we could not count.
+            log(step="sign_in", status="counter_unwritable")
+            return False
         try:
             submit.click(timeout=10_000)
         except Exception:
@@ -470,7 +575,13 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
                 reason="overlay_blocking_submit")
             return False
 
-        page.wait_for_load_state("networkidle", timeout=60_000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=60_000)
+        except Exception:
+            # A slow page is not a verdict: judge the outcome below from the URL
+            # and the password field, so a real success still clears the
+            # counter and saves the session.
+            log(step="sign_in", status="slow_load")
         page.wait_for_timeout(2_500)
 
         url = page.url.lower()
@@ -481,14 +592,13 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
         if challenged:
             # A step-up challenge is NOT a credential failure, but retrying it in a
             # loop is still how an account gets locked — so it counts toward the
-            # ceiling and needs a human to read the biller account's inbox.
-            _bump_login_failure(settings)
+            # ceiling (already counted before submit) and needs a human to read
+            # the biller account's inbox.
             log(step="sign_in", status="challenged",
                 reason="step_up_verification_required")
             return False
         if on_login:
             # No detail logged: the page may render the account identity.
-            _bump_login_failure(settings)
             log(step="sign_in", status="failed", reason="still_on_login_page")
             return False
 
@@ -504,7 +614,6 @@ def sign_in(context, settings: Settings, guard: LoginAttemptGuard) -> bool:
         except Exception:
             still_asking = False
         if still_asking:
-            _bump_login_failure(settings)
             log(step="sign_in", status="failed", reason="password_field_still_present")
             return False
 

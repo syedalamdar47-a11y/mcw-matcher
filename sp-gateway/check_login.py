@@ -81,6 +81,14 @@ def probe(headed: bool) -> int:
 
 def signin(headed: bool) -> int:
     """Exactly one real sign-in attempt."""
+    import os
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        # As root the saved session and the failure counter would be written
+        # root-owned, unreadable/unwritable for the scheduler (user `gateway`).
+        print("refusing to sign in as root — run: fly ssh console -a mcw-sp-gateway -u gateway "
+              "-C \"python check_login.py --signin\"")
+        return 2
     settings = config.load_settings()
     if not settings.configured:
         safety.log(step="signin", status="skipped", reason="credentials_not_set")

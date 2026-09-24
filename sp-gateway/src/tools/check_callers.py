@@ -26,7 +26,7 @@ hash of a phone number (a 10-digit number's hash can be reversed in seconds). Re
 check_clients' _get (host allow-list, no redirects, budget, pacing). Does not
 sign in (exit 3 if the session has expired) unless run with --signin, which
 renews the gateway's one session via src/tools/on_demand.py (guarded, at most
-once per 30 minutes).
+once per 30 minutes; must run as the gateway user: fly ssh console -u gateway).
 
     fly ssh console --app mcw-sp-gateway -C "python -u -m src.tools.check_callers 2026-09-01 2026-09-30"
     ... --write   also saves the results to the FDO dashboard's sp_caller_checks
@@ -107,6 +107,24 @@ def _load_callers(settings, start: date, end: date) -> list[dict]:
     return sorted(callers.values(), key=lambda c: (c["first_dt"], str(c["cid"])))[:MAX_CALLERS]
 
 
+def table_rows_of(c: dict, row: dict, stamp: str) -> list[dict]:
+    """sp_caller_checks rows for one caller: the caller's result on every one of
+    their answered New Client call ids. Vocabulary-checked; no client value."""
+    return [{
+        "aircall_call_id": cid,
+        "first_call": row["first_call"],
+        "checked_at": stamp,
+        "found": int(row.get("found") or 0),
+        "matched_by": row.get("matched_by") if row.get("matched_by") in MATCHED_BY else None,
+        "created_rel_days": row.get("created_rel_days") if isinstance(row.get("created_rel_days"), int) else None,
+        "sp_status": row.get("sp_status") if row.get("sp_status") in SP_STATUS else None,
+        "first_appointment": row.get("first"),
+        "first_status": row["first_status"] if row["first_status"] in FIRST_STATUS else "error",
+        "appointments": int(row.get("appts") or 0),
+        "source": "gateway",
+    } for cid in c["ids"]]
+
+
 def _check(c: dict, cookies, budget, pacer, now: datetime) -> dict:
     day = datetime(c["first"].year, c["first"].month, c["first"].day, tzinfo=ET)
     row = {"k": str(c["cid"]), "first_call": c["first"].isoformat(), "calls": c["calls"], "found": 0,
@@ -184,6 +202,11 @@ def main(argv: list[str]) -> int:
     if not (settings.fdo_supabase_url and settings.fdo_supabase_service_key):
         print("FDO_SUPABASE_URL / FDO_SUPABASE_SERVICE_KEY not set")
         return 2
+    # Who to check first: no callers = no reason to touch SimplePractice at all.
+    callers = _load_callers(settings, start, end)
+    out({"callers": len(callers), "calls": sum(c["calls"] for c in callers)})
+    if not callers:
+        return 0
     cookies = session.cookies_from_state(settings)
     probe_budget = safety.RequestBudget(limit=2)
     probe_pacer = safety.Pacer(settings.min_delay_s, settings.max_delay_s)
@@ -199,8 +222,6 @@ def main(argv: list[str]) -> int:
         cookies = session.cookies_from_state(settings)
         if not cookies:
             raise
-    callers = _load_callers(settings, start, end)
-    out({"callers": len(callers), "calls": sum(c["calls"] for c in callers)})
     budget = safety.RequestBudget(limit=8 * len(callers) + 20)
     pacer = safety.Pacer(settings.min_delay_s, settings.max_delay_s)
     now = datetime.now(ET)
@@ -218,20 +239,7 @@ def main(argv: list[str]) -> int:
             errors[type(exc).__name__] += 1
         totals[f"{row.get('matched_by') or 'none'}:{row['first_status']}"] += 1
         out(row)
-        for cid in c["ids"]:
-            table_rows.append({
-                "aircall_call_id": cid,
-                "first_call": row["first_call"],
-                "checked_at": stamp,
-                "found": int(row.get("found") or 0),
-                "matched_by": row.get("matched_by") if row.get("matched_by") in MATCHED_BY else None,
-                "created_rel_days": row.get("created_rel_days") if isinstance(row.get("created_rel_days"), int) else None,
-                "sp_status": row.get("sp_status") if row.get("sp_status") in SP_STATUS else None,
-                "first_appointment": row.get("first"),
-                "first_status": row["first_status"] if row["first_status"] in FIRST_STATUS else "error",
-                "appointments": int(row.get("appts") or 0),
-                "source": "gateway",
-            })
+        table_rows.extend(table_rows_of(c, row, stamp))
     out({"totals": dict(totals), "errors": dict(errors), "requests": budget.used})
     if write and table_rows:
         fdo = Sink(settings, url=settings.fdo_supabase_url, key=settings.fdo_supabase_service_key)
@@ -246,7 +254,10 @@ if __name__ == "__main__":
     try:
         code = main(sys.argv[1:])
     except SessionExpired:
-        print("SESSION EXPIRED — stopping; the scheduler refreshes it during business hours")
+        print("SESSION EXPIRED — the on-demand sign-in did not run; see the on_demand_signin log line "
+              "(cooldown / busy / locked_needs_human / not_on_gateway / run_as_gateway_user)"
+              if "--signin" in sys.argv[1:]
+              else "SESSION EXPIRED — stopping; the scheduler renews it in business hours (or re-run with --signin as -u gateway)")
         code = 3
     except safety.SafetyViolation as exc:
         print("stopped:", safety.scrub_text(str(exc)))

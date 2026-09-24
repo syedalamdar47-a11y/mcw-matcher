@@ -35,6 +35,14 @@ class SafetyViolation(RuntimeError):
     """Raised instead of doing the unsafe thing. Never caught-and-continued."""
 
 
+class SessionBusy(SafetyViolation):
+    """The session lock is held: another gateway process is signing in right now.
+
+    Still a SafetyViolation (whoever doesn't know it keeps refusing), but the
+    scheduler treats it as "try again next tick" instead of opening the
+    one-hour breaker — by then the winner has saved a fresh session."""
+
+
 # --------------------------------------------------------------------------
 # Request gating
 # --------------------------------------------------------------------------
