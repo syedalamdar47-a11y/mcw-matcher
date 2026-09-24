@@ -89,7 +89,7 @@ FIRST_STATUS = frozenset({
     "attended", "no_show", "cancelled", "late_cancelled", "clinician_cancelled",
     "upcoming", "no_appointment", "not_found", "error",
 })
-MATCHED_BY = frozenset({"phone", "email", "couple"})
+MATCHED_BY = frozenset({"phone", "email", "name", "couple"})
 SP_STATUS = frozenset({"active", "inactive", "prospective", "other"})
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
