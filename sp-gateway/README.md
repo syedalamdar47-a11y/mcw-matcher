@@ -199,7 +199,35 @@ Date Booked to 120 after) counts, so a child booked on a parent's number never
 inherits the parents' couple record. If the couple search itself fails, a
 session on the other record is still used; with none, the contact is an error
 and its previous row is kept (a failed lookup never overwrites a good row; see
-`step='errors' status='kept_previous_row'`). The same re-check runs in
+`step='errors' status='kept_previous_row'`). The same couple re-check runs in
 `check_callers`.
+Family bookings (added 2026-09-25): a parent books family therapy, the
+parent's name is not a SimplePractice client, and the sessions sit on the
+children's records, which the full 10-digit phone search returns (their own
+default number is a different one). When that search returns 2-3 records whose
+last name carries the HubSpot contact's surname as a whole word (every one of
+them, or — for a Type of Therapy containing "Family" — those that do), they are
+the family: the first session on/after Date Booked across them is reported with
+`matched_by = 'family'` (no session: `no_appointment`, still found). More than 3
+records is never a family. For any booking that is not Family therapy the family
+is a last resort: it is looked at only when nothing else was found (neither the
+contact's own record nor a couple record), and only records opened around the
+booking count (30 days before Date Booked to 120 after) — relatives in
+long-standing therapy on the same number never make a missing client "found".
+A Family booking re-checks the family even when the contact's own record was
+found without a session (like a couple for a Couples booking). Order:
+individual → couple → family; Couples type: couple → individual → family;
+Family type: individual → family → couple. It reuses the phone search (asking
+for name fields only when the contact has a surname), so it adds only session
+lists; the per-contact ceiling `ITEM_MAX_REQUESTS` is 17 (was 14; only a Family
+booking can reach it). A failed family lookup follows the couple rule: another
+place's session is used (after a failed family step, only a couple file opened
+around the booking); otherwise error, previous row kept. `check_callers` has
+its own matching path and does not use this rule.
+Acceptance check after deploy (the whole-word last-name rule is stricter than
+what the discovery run printed): the verified Family booking should read
+`matched_by = 'family'` in `sp_client_checks`. If it is still `found = 0`,
+suspect the last-name rule first (hyphenated / suffixed / apostrophe surnames
+are deliberately not matched).
 Watch `fly logs` for `feed='sp_client_check'` lines: `step='contacts'`,
 `step='totals'`, and the final `status='ok'` with `budget_used`.

@@ -53,9 +53,14 @@ NAME_FIELDS = CLIENT_FIELDS + ",firstName,lastName,preferredName"
 # The most SimplePractice requests _check_item can make for ONE contact:
 # 3 individual searches (phone, e-mail, name) + 2 couple searches (phone, name)
 # + up to MAX_MATCHES appointment lists each for the individual records, their
-# couple-map couples (feed, when enabled) and the matched couple records.
+# couple-map couples (feed, when enabled), the family records (_family_records:
+# reuses the phone search, so lists only) and the matched couple records.
 # Callers reserve twice this (a re-auth re-runs the contact) before starting one.
-ITEM_MAX_REQUESTS = 5 + 3 * MAX_MATCHES
+# 2026-09-25: 14 -> 17 for the family step. Only a Family booking can reach 17
+# (own records + couple-map + family + couple); any other booking still tops out
+# at 14, because its family step runs only when nothing else was found. Both
+# bounds are asserted in scratchpad sp_client_check_family.py.
+ITEM_MAX_REQUESTS = 5 + 4 * MAX_MATCHES
 
 # SimplePractice attendanceStatus -> our fixed vocabulary. Anything else is
 # reported as unknown_status rather than echoed.
@@ -115,10 +120,10 @@ def _get(path_qs: str, cookies, budget, pacer):
     return resp.json()
 
 
-def _search_clients(term: str, cookies, budget, pacer) -> list[dict]:
+def _search_clients(term: str, cookies, budget, pacer, fields: str = CLIENT_FIELDS) -> list[dict]:
     qs = "clients?" + urlencode({
         "filter[search]": term,
-        "fields[clients]": CLIENT_FIELDS,
+        "fields[clients]": fields,
         "page[size]": str(SEARCH_PAGE),
     })
     return (_get(qs, cookies, budget, pacer).get("data")) or []
@@ -307,6 +312,41 @@ def _is_couples(it: dict) -> bool:
     return "couple" in str(it.get("therapy") or "").lower()
 
 
+def _is_family(it: dict) -> bool:
+    """HubSpot's Type of Therapy names family work ("Family Therapy"). Memory
+    only, like _is_couples; never printed or written."""
+    return "family" in str(it.get("therapy") or "").lower()
+
+
+def _family_records(it: dict, style: str | None, hits: list[dict]) -> list[dict]:
+    """The family a booking's phone number reaches, when the sessions are filed
+    on family members' records instead of the HubSpot contact's own. Seen
+    2026-09-25 on a "Family Therapy" booking: the contact's name is not a
+    SimplePractice client, but the full 10-digit search returns two records of
+    one family whose own default number is a different one. (The discovery
+    tool's surname check was a substring over every attribute; the whole-word
+    lastName rule below is stricter and is proven on that booking only by the
+    post-deploy row — see README.)
+
+    From that phone search's hits — 2 to MAX_MATCHES of them; a bigger answer is
+    a shared line or noise, never treated as a family — the records whose
+    lastName carries the HubSpot contact's surname as a WHOLE word ("Lee" is not
+    in "Leeson"). A booking whose Type of Therapy says Family keeps those
+    records; any other booking only when EVERY hit carries the surname, so a
+    number shared by unrelated people never counts (and _check_item then keeps
+    only the records opened around the booking). [] otherwise (no surname, no
+    digits-style phone search). No request of its own."""
+    last = it.get("last")
+    if style != "digits" or not _fold(last) or not (2 <= len(hits) <= MAX_MATCHES):
+        return []
+    same = [c for c in hits
+            if _ID_RE.fullmatch(str(c.get("id") or ""))
+            and _name_in(last, set(_words(_attrs(c).get("lastName"))))]
+    if _is_family(it):
+        return same
+    return same if len(same) == len(hits) else []
+
+
 def _narrow(matches: list[dict], booked: datetime) -> list[dict]:
     """Well-formed ids only; when a number is shared, prefer the records created
     around the booking (a new booking creates its record near that date); at
@@ -354,14 +394,23 @@ def _couple_sessions(it: dict, booked: datetime, cookies, budget, pacer,
     return couples, _sessions([str(c["id"]) for c in couples], booked, cookies, budget, pacer)
 
 
-def _find_individual(it: dict, style: str | None, row: dict, cookies, budget, pacer) -> tuple[list[dict], str | None]:
+def _find_individual(it: dict, style: str | None, row: dict, cookies, budget,
+                     pacer) -> tuple[list[dict], str | None, list[dict]]:
     """The contact's individual client record(s): phone digits, then e-mail,
     then exact first + last name. Search is fuzzy, so a match must actually
-    carry the number / e-mail / name we asked for. Sets row["hits"]."""
+    carry the number / e-mail / name we asked for. Sets row["hits"].
+
+    Returns (matches, matched_by, phone_hits): phone_hits is the phone search's
+    whole answer, for _family_records (in memory only, never in `row`). It
+    carries the name fields only when the contact has a surname to compare —
+    same request, no extra one."""
     matches: list[dict] = []
     matched_by = None
+    phone_hits: list[dict] = []
     if it["ph"] and len(it["ph"]) == 10 and style:
-        hits = _search_clients(_phone_style(it["ph"], style), cookies, budget, pacer)
+        fields = NAME_FIELDS if _fold(it.get("last")) else CLIENT_FIELDS
+        hits = _search_clients(_phone_style(it["ph"], style), cookies, budget, pacer, fields=fields)
+        phone_hits = hits
         row["hits"] = len(hits)
         matches = [c for c in hits if _digits(_attrs(c).get("defaultPhoneNumber")) == it["ph"]]
         if not matches and len(hits) == 1 and style == "digits":
@@ -394,39 +443,52 @@ def _find_individual(it: dict, style: str | None, row: dict, cookies, budget, pa
                    if (_fold(_attrs(c).get("firstName")) == first and _fold(_attrs(c).get("lastName")) == last)
                    or _fold(_attrs(c).get("preferredName")) == first + last]
         matched_by = "name" if matches else None
-    return matches, matched_by
+    return matches, matched_by, phone_hits
 
 
 def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: datetime,
                 couple_of: dict[str, str] | None = None) -> dict:
     """One HubSpot contact -> one result row of counts, dates and vocabulary.
 
-    Two places a booking can live in SimplePractice, tried in turn until one
+    Three places a booking can live in SimplePractice, tried in turn until one
     has a session on/after the Date Booked:
-      * the individual client record (phone -> e-mail -> exact name), and
+      * the individual client record (phone -> e-mail -> exact name),
       * a clientCouples record (base-clients search: phone digits, or both
         names as whole words). Couples therapy is filed there and the couple
         record OWNS the sessions — the phone search meanwhile finds ONE
         PARTNER's individual record, whose appointment list is empty (verified
-        on August 2026 data).
-    Individual first; the couple record first when HubSpot's Type of Therapy
-    says couples. The couple search runs at most once per contact. When neither
-    record has a session, the first record found is reported (no_appointment);
-    when neither is found, not_found.
+        on August 2026 data), and
+      * the family's records (_family_records: 2-3 hits of the phone search
+        sharing the contact's surname; matched_by "family"). A parent books
+        family therapy and the sessions sit on the children's records
+        (seen 2026-09-25). The first session across them counts.
+    Order: individual -> couple -> family; Couples type: couple -> individual
+    -> family; Family type: individual -> family -> couple. Each place is
+    searched at most once per contact. When no record has a session, the first
+    record found is reported (no_appointment); when none is found, not_found.
 
-    Guards: after an individual record was found (booking not couples therapy),
-    only a couple file opened around the booking counts (_couple_sessions
-    opened_near). If the couple step fails (UpstreamError) the other place is
-    still tried and a session found there is used; with no session anywhere the
-    failure is re-raised, so the row is "error", not no_appointment.
+    Guards: after the contact's OWN individual record was found (booking not
+    couples therapy), only a couple file opened around the booking counts
+    (_couple_sessions opened_near). The family step runs for a Family booking;
+    for any other booking only when NOTHING was found (neither the contact's
+    own record nor a couple record) and then only with the family records
+    opened around the booking (_opened_near) — so relatives in long-standing
+    therapy never make a missing client "found", and a Couples booking's
+    sessionless couple file is never replaced by a partner's individual
+    session. If the couple or family step fails (UpstreamError) the other
+    places are still tried and a session found there is used (after a failed
+    family step, only a couple file opened around the booking); with no
+    session anywhere the failure is re-raised, so the row is "error", not
+    no_appointment/not_found.
 
     `couple_of` maps an individual client id to the clientCouples record it
     sits in (built once per run by the feed; None for the one-off tool). It is
     consulted only when a matched individual has no sessions of their own.
 
     Request cost: at most ITEM_MAX_REQUESTS; the couple step adds 1-2 searches
-    (+1 appointment list per matched couple, at most MAX_MATCHES) and runs only
-    for a contact whose individual record is missing or has no session.
+    (+1 appointment list per matched couple, at most MAX_MATCHES), the family
+    step only appointment lists (at most MAX_MATCHES, none for a record whose
+    list was already read); both run only while no session has been found.
     """
     booked = datetime.strptime(it["booked"], "%Y-%m-%d").replace(tzinfo=ET)
     row = {"i": it["i"], "found": 0, "hits": 0, "matched_by": None, "sp_status": None,
@@ -435,13 +497,17 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
 
     # Every record set found, in the order tried: (records, matched_by, sessions, in_couple).
     found: list[tuple[list[dict], str, list[tuple[datetime, str]], bool]] = []
+    own_ids: list[str] = []            # the contact's OWN individual record(s), once found
+    phone_hits: list[dict] = []        # the phone search's answer, for the family step
 
     def _try_individual() -> None:
-        matches, matched_by = _find_individual(it, style, row, cookies, budget, pacer)
+        nonlocal phone_hits
+        matches, matched_by, phone_hits = _find_individual(it, style, row, cookies, budget, pacer)
         matches = _narrow(matches, booked)
         if not matches:
             return
         ids = [str(c["id"]) for c in matches]
+        own_ids.extend(ids)
         sessions = _sessions(ids, booked, cookies, budget, pacer)
         in_couple = False
         # The couple map (feed, when enabled): a matched individual with no
@@ -454,33 +520,68 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
         found.append((matches, matched_by, sessions, in_couple))
 
     def _try_couple() -> None:
-        # An individual record already found, booking not couples therapy: only
-        # a couple file opened around this booking may take over (a child on a
-        # parent's number must not inherit the parents' couple sessions).
-        couples, sessions = _couple_sessions(it, booked, cookies, budget, pacer,
-                                             opened_near=bool(found) and not _is_couples(it))
+        # The contact's own individual record already found, booking not
+        # couples therapy: only a couple file opened around this booking may
+        # take over (a child on a parent's number must not inherit the parents'
+        # couple sessions). A family match is not the contact's own record, so
+        # it leaves this rule exactly as it was before the family step existed —
+        # except after a FAILED family step (Family order: individual -> family
+        # -> couple). Then an old couple file must not stand in for the family
+        # we could not read: tonight's row would differ from every good night's
+        # and overwrite it. With the guard it is "error" and the row is kept.
+        # (step_failed is read when the step runs, i.e. after the family step.)
+        couples, sessions = _couple_sessions(
+            it, booked, cookies, budget, pacer,
+            opened_near=(bool(own_ids) or step_failed is not None) and not _is_couples(it))
         if couples:
             found.append((couples, "couple", sessions, False))
 
-    couple_failed: UpstreamError | None = None
-    for step in ((_try_couple, _try_individual) if _is_couples(it) else (_try_individual, _try_couple)):
+    def _try_family() -> None:
+        # Anything already found — the contact's own record, or a couple record
+        # (a Couples booking's sessionless couple file) — beats relatives,
+        # unless the booking IS family therapy: then the family is re-checked
+        # when the client's own record has none (like a couple for a Couples
+        # booking).
+        if found and not _is_family(it):
+            return
+        family = _family_records(it, style, phone_hits)
+        if not _is_family(it):
+            # Not a Family booking: only records opened for THIS booking (30
+            # days before Date Booked to LOOKAHEAD_DAYS after), the same guard
+            # as _couple_sessions opened_near. Relatives in long-standing
+            # therapy on the same number must not turn a missing client into
+            # "found", nor lend an older sibling's session to a new child.
+            family = [c for c in family if _opened_near(c, booked)]
+        ids = [str(c["id"]) for c in family if str(c["id"]) not in own_ids]   # own lists already read
+        if not ids:
+            return
+        found.append((family, "family", _sessions(ids, booked, cookies, budget, pacer), False))
+
+    if _is_couples(it):
+        steps = (_try_couple, _try_individual, _try_family)
+    elif _is_family(it):
+        steps = (_try_individual, _try_family, _try_couple)
+    else:
+        steps = (_try_individual, _try_couple, _try_family)
+    step_failed: UpstreamError | None = None
+    for step in steps:
         try:
             step()
         except UpstreamError as exc:
-            if step is not _try_couple:
+            if step is _try_individual:
                 raise
-            # The couple search (base-clients) or a couple's session list
-            # failed. The other place may still hold the session; only when
-            # neither does is the failure re-raised below.
-            couple_failed = exc
+            # The couple search (base-clients), a couple's or a relative's
+            # session list failed. Another place may still hold the session;
+            # only when none does is the failure re-raised below.
+            step_failed = step_failed or exc
             continue
         if found and found[-1][2]:
-            break               # this record has a session: the other is never searched
-    if couple_failed is not None and not any(f[2] for f in found):
+            break               # this record has a session: the later places are never searched
+    if step_failed is not None and not any(f[2] for f in found):
         # No session anywhere we could read, and one place we could NOT read:
         # "error", never a misleading no_appointment / not_found. (The nightly
         # feed then keeps the contact's previous row.)
-        raise couple_failed
+        raise step_failed
 
     if not found:
         return row

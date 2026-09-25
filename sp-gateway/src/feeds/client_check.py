@@ -90,7 +90,10 @@ FIRST_STATUS = frozenset({
     "attended", "no_show", "cancelled", "late_cancelled", "clinician_cancelled",
     "upcoming", "no_appointment", "not_found", "error",
 })
-MATCHED_BY = frozenset({"phone", "email", "name", "couple"})
+# "family" (2026-09-25): found through family members' records reached by the
+# booking's number (check_clients._family_records). matched_by is a plain TEXT
+# column (migration 013, no CHECK constraint), so no migration is needed.
+MATCHED_BY = frozenset({"phone", "email", "name", "couple", "family"})
 SP_STATUS = frozenset({"active", "inactive", "prospective", "other"})
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -179,7 +182,8 @@ def _load_contacts(fdo, since: date) -> tuple[list[dict], int]:
             "first": str(r.get("first_name") or "").strip(),
             "last": str(r.get("last_name") or "").strip(),
             # HubSpot Type of Therapy: "Couples..." looks at the couple record
-            # first (check_clients._is_couples). Memory only, never written.
+            # first (check_clients._is_couples); "Family..." re-checks the
+            # family's records (_is_family). Memory only, never written.
             "therapy": str(r.get("type_of_therapy") or "").strip(),
             "booked": booked,
         })
@@ -358,8 +362,9 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
 
     # The scheduler hands every feed the same per-run ceiling. This one's work
     # is proportional to the contact list (2-5 requests each on average, at
-    # most ITEM_MAX_REQUESTS; the couple re-check adds 1-2 searches only for a
-    # contact with no session) plus the couple map, so the ceiling is raised on
+    # most ITEM_MAX_REQUESTS; the couple re-check adds 1-2 searches and the
+    # family step up to 3 session lists, only for a contact with no session
+    # yet) plus the couple map, so the ceiling is raised on
     # the budget we were given — raised, not replaced, so the scheduler's own
     # budget_used log line stays truthful. In practice RUN_DEADLINE binds first:
     # at the 0.7-1.8 s pacing, 22 minutes is ~800 requests.
