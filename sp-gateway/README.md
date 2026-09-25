@@ -185,7 +185,21 @@ Supabase table `sp_client_checks` (no names, numbers or e-mails). Runs once per
 night between 21:00 and 05:00 ET, when the calendar feed is idle. Needs the Fly
 secrets `FDO_SUPABASE_URL` and `FDO_SUPABASE_SERVICE_KEY` (see
 `deploy/set-secrets.ps1`); without them it logs `fdo_supabase_not_configured`
-once a night and does nothing. Couples are filed under a separate SimplePractice
-couple record that exposes no members, so they read as `not_found` for now.
+once a night and does nothing. Couples therapy is filed under a separate
+SimplePractice couple record (clientCouples) that owns the sessions; the phone
+search usually finds one partner's individual record, which has none. So a
+contact whose individual record is missing or has no session on/after Date
+Booked is also looked up as a couple (base-clients search: the phone digits, or
+both first and last name as whole words of the couple's name — "Ann" never
+matches inside "Joann"), and the couple's first session is used when it has
+one. Contacts whose HubSpot Type of Therapy says "Couples" try the couple record
+first. When an individual record was already found and the booking is not
+couples therapy, only a couple file opened around the booking (30 days before
+Date Booked to 120 after) counts, so a child booked on a parent's number never
+inherits the parents' couple record. If the couple search itself fails, a
+session on the other record is still used; with none, the contact is an error
+and its previous row is kept (a failed lookup never overwrites a good row; see
+`step='errors' status='kept_previous_row'`). The same re-check runs in
+`check_callers`.
 Watch `fly logs` for `feed='sp_client_check'` lines: `step='contacts'`,
 `step='totals'`, and the final `status='ok'` with `budget_used`.

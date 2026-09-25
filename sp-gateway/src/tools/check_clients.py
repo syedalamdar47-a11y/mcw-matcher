@@ -50,6 +50,12 @@ SEARCH_PAGE = 10         # fuzzy search may return more than the exact match
 LOOKAHEAD_DAYS = 120     # how far past the booking date a "first appointment" may sit
 CLIENT_FIELDS = "status,createdAt,defaultPhoneNumber,defaultEmailAddress"
 NAME_FIELDS = CLIENT_FIELDS + ",firstName,lastName,preferredName"
+# The most SimplePractice requests _check_item can make for ONE contact:
+# 3 individual searches (phone, e-mail, name) + 2 couple searches (phone, name)
+# + up to MAX_MATCHES appointment lists each for the individual records, their
+# couple-map couples (feed, when enabled) and the matched couple records.
+# Callers reserve twice this (a re-auth re-runs the contact) before starting one.
+ITEM_MAX_REQUESTS = 5 + 3 * MAX_MATCHES
 
 # SimplePractice attendanceStatus -> our fixed vocabulary. Anything else is
 # reported as unknown_status rather than echoed.
@@ -148,24 +154,59 @@ def _search_couples(term: str, cookies, budget, pacer) -> list[dict]:
     return [c for c in data if isinstance(c, dict) and c.get("type") == "clientCouples"]
 
 
+def _words(s) -> list[str]:
+    """The name words of a string: accents stripped, lower-case, split on
+    anything that is not a letter ("Kathleen & Joann Brown" -> kathleen, joann,
+    brown)."""
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+    return [w for w in re.split(r"[^a-z]+", s) if w]
+
+
+def _name_words(attributes) -> set[str]:
+    """Every whole name word of a record's NAME attributes only — the top-level
+    keys ending in "name" (a couple's preferredName "Name & Name", firstName,
+    lastName, ...). E-mail, address, phones and notes never count."""
+    if not isinstance(attributes, dict):
+        return set()
+    return {w for k, v in attributes.items()
+            if isinstance(k, str) and k.lower().endswith("name") and isinstance(v, str)
+            for w in _words(v)}
+
+
+def _name_in(part, words: set[str]) -> bool:
+    """A HubSpot first or last name is in a record when it is a WHOLE word there
+    ("Ann" is not in "Joann", "Lee" not in "Kathleen", "Smith" not in
+    "Smithson"), or every word of a multi-part name is ("Mary-Jane", "De La Cruz")."""
+    parts = _words(part)
+    return bool(parts) and ("".join(parts) in words or all(p in words for p in parts))
+
+
+def _opened_near(c: dict, booked: datetime) -> bool:
+    """The record was created around this booking: from 30 days before the
+    Date Booked to LOOKAHEAD_DAYS after it (a new booking opens its file then)."""
+    dt = _parse_dt(_attrs(c).get("createdAt"))
+    return bool(dt) and booked - timedelta(days=30) <= dt <= booked + timedelta(days=LOOKAHEAD_DAYS)
+
+
 def _match_couple(it: dict, cookies, budget, pacer) -> list[dict]:
     """A couple record for this HubSpot contact: by the phone digits (the record
     carries the number, or is the single couple a full 10-digit search returns),
-    then by first + last name (both must appear in the couple's record)."""
+    then by first + last name — BOTH must be whole words of the couple's name
+    attributes. A shared surname alone, or a name hidden inside another name
+    ("Ann" in "Joann"), never matches."""
     ph = it.get("ph") or ""
     if len(ph) == 10:
         hits = _search_couples(ph, cookies, budget, pacer)
         carrying = [c for c in hits if ph in {_digits(s) for s in _strings_of(c.get("attributes"))}]
         if carrying or len(hits) == 1:
             return carrying or hits
-    first, last = _fold(it.get("first")), _fold(it.get("last"))
-    if first and last:
-        term = f"{str(it.get('first') or '').strip()} {str(it.get('last') or '').strip()}"
-        hits = _search_couples(term, cookies, budget, pacer)
+    first, last = it.get("first"), it.get("last")
+    if _fold(first) and _fold(last):
+        term = f"{str(first or '').strip()} {str(last or '').strip()}"
         named = []
-        for c in hits:
-            folded = " ".join(_fold(s) for s in _strings_of(c.get("attributes")))
-            if first in folded and last in folded:
+        for c in _search_couples(term, cookies, budget, pacer):
+            words = _name_words(c.get("attributes"))
+            if _name_in(first, words) and _name_in(last, words):
                 named.append(c)
         return named
     return []
@@ -260,21 +301,63 @@ def _load_input(path: str) -> list[dict]:
     return result
 
 
-def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: datetime,
-                couple_of: dict[str, str] | None = None) -> dict:
-    """One HubSpot contact -> one result row of counts, dates and vocabulary.
+def _is_couples(it: dict) -> bool:
+    """HubSpot's Type of Therapy names couples work ("Couples/Marriage Therapy").
+    Held in memory only, like the number and e-mail; never printed or written."""
+    return "couple" in str(it.get("therapy") or "").lower()
 
-    `couple_of` maps an individual client id to the clientCouples record it
-    sits in (built once per run by the feed; None for the one-off tool). It is
-    consulted only when a matched individual has no sessions of their own.
-    """
-    booked = datetime.strptime(it["booked"], "%Y-%m-%d").replace(tzinfo=ET)
-    row = {"i": it["i"], "found": 0, "hits": 0, "matched_by": None, "sp_status": None,
-           "sp_created": None, "couple": False, "first": None, "first_status": "not_found",
-           "appts": 0, "ambiguous": False}
 
-    # 1. Find the client: by phone digits first, then e-mail. Search is fuzzy,
-    #    so a match must actually carry the number / e-mail we asked for.
+def _narrow(matches: list[dict], booked: datetime) -> list[dict]:
+    """Well-formed ids only; when a number is shared, prefer the records created
+    around the booking (a new booking creates its record near that date); at
+    most MAX_MATCHES, so no contact can fan out into a roster of lookups."""
+    matches = [c for c in matches if _ID_RE.fullmatch(str(c.get("id") or ""))]
+    if len(matches) > 1:
+        matches = [c for c in matches if _opened_near(c, booked)] or matches
+    return matches[:MAX_MATCHES]
+
+
+def _sessions(ids: list[str], booked: datetime, cookies, budget, pacer) -> list[tuple[datetime, str]]:
+    """(start, status) of every session on/after `booked` across these records
+    (a parent's number may book for two children), oldest first. One request
+    per id."""
+    appts: list[tuple[datetime, str]] = []
+    for cid in ids:
+        for a in _appointments(cid, booked, cookies, budget, pacer):
+            at = _attrs(a)
+            dt = _parse_dt(at.get("startTime"))
+            if dt and dt >= booked:   # belt-and-braces on the server's timeRange
+                appts.append((dt, STATUS.get(str(at.get("attendanceStatus")), "unknown_status")))
+    appts.sort(key=lambda x: x[0])
+    return appts
+
+
+def _couple_sessions(it: dict, booked: datetime, cookies, budget, pacer,
+                     opened_near: bool = False) -> tuple[list[dict], list[tuple[datetime, str]]]:
+    """The contact's clientCouples record(s) — matched exactly as _match_couple
+    does (the phone digits, or BOTH first and last name as whole words) — and
+    their sessions on/after `booked`. ([], []) when no couple record matches;
+    then no appointment list is requested. Shared with check_callers.
+
+    opened_near=True (an individual record was already found and the booking is
+    not couples therapy): only a couple file opened around this booking counts
+    (_opened_near). A family shares one number, so a child booked on a parent's
+    phone must not inherit the parents' long-standing couple record and its
+    sessions; the partner-record case (the couple file is opened at booking)
+    still passes. Rejected records cost no appointment request."""
+    couples = _match_couple(it, cookies, budget, pacer)
+    if opened_near:
+        couples = [c for c in couples if _opened_near(c, booked)]
+    couples = _narrow(couples, booked)
+    if not couples:
+        return [], []
+    return couples, _sessions([str(c["id"]) for c in couples], booked, cookies, budget, pacer)
+
+
+def _find_individual(it: dict, style: str | None, row: dict, cookies, budget, pacer) -> tuple[list[dict], str | None]:
+    """The contact's individual client record(s): phone digits, then e-mail,
+    then exact first + last name. Search is fuzzy, so a match must actually
+    carry the number / e-mail / name we asked for. Sets row["hits"]."""
     matches: list[dict] = []
     matched_by = None
     if it["ph"] and len(it["ph"]) == 10 and style:
@@ -311,25 +394,103 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
                    if (_fold(_attrs(c).get("firstName")) == first and _fold(_attrs(c).get("lastName")) == last)
                    or _fold(_attrs(c).get("preferredName")) == first + last]
         matched_by = "name" if matches else None
-    if not matches:
-        # Last of all, a couples record (see _search_couples). Its sessions are
-        # listed by filter[clientId]=<couple id> like any client's.
-        matches = _match_couple(it, cookies, budget, pacer)
-        matched_by = "couple" if matches else None
-    matches = [c for c in matches if _ID_RE.fullmatch(str(c.get("id") or ""))]
-    row["couple"] = any((c.get("type") or "clients") != "clients" for c in matches)
-    # A new booking creates a client record near the booking date: when a
-    # number is shared, prefer the records created around the booking.
-    if len(matches) > 1:
-        near = [c for c in matches
-                if (dt := _parse_dt(_attrs(c).get("createdAt"))) and booked - timedelta(days=30) <= dt <= booked + timedelta(days=LOOKAHEAD_DAYS)]
-        matches = near or matches
-    matches = matches[:MAX_MATCHES]
+    return matches, matched_by
+
+
+def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: datetime,
+                couple_of: dict[str, str] | None = None) -> dict:
+    """One HubSpot contact -> one result row of counts, dates and vocabulary.
+
+    Two places a booking can live in SimplePractice, tried in turn until one
+    has a session on/after the Date Booked:
+      * the individual client record (phone -> e-mail -> exact name), and
+      * a clientCouples record (base-clients search: phone digits, or both
+        names as whole words). Couples therapy is filed there and the couple
+        record OWNS the sessions — the phone search meanwhile finds ONE
+        PARTNER's individual record, whose appointment list is empty (verified
+        on August 2026 data).
+    Individual first; the couple record first when HubSpot's Type of Therapy
+    says couples. The couple search runs at most once per contact. When neither
+    record has a session, the first record found is reported (no_appointment);
+    when neither is found, not_found.
+
+    Guards: after an individual record was found (booking not couples therapy),
+    only a couple file opened around the booking counts (_couple_sessions
+    opened_near). If the couple step fails (UpstreamError) the other place is
+    still tried and a session found there is used; with no session anywhere the
+    failure is re-raised, so the row is "error", not no_appointment.
+
+    `couple_of` maps an individual client id to the clientCouples record it
+    sits in (built once per run by the feed; None for the one-off tool). It is
+    consulted only when a matched individual has no sessions of their own.
+
+    Request cost: at most ITEM_MAX_REQUESTS; the couple step adds 1-2 searches
+    (+1 appointment list per matched couple, at most MAX_MATCHES) and runs only
+    for a contact whose individual record is missing or has no session.
+    """
+    booked = datetime.strptime(it["booked"], "%Y-%m-%d").replace(tzinfo=ET)
+    row = {"i": it["i"], "found": 0, "hits": 0, "matched_by": None, "sp_status": None,
+           "sp_created": None, "couple": False, "first": None, "first_status": "not_found",
+           "appts": 0, "ambiguous": False}
+
+    # Every record set found, in the order tried: (records, matched_by, sessions, in_couple).
+    found: list[tuple[list[dict], str, list[tuple[datetime, str]], bool]] = []
+
+    def _try_individual() -> None:
+        matches, matched_by = _find_individual(it, style, row, cookies, budget, pacer)
+        matches = _narrow(matches, booked)
+        if not matches:
+            return
+        ids = [str(c["id"]) for c in matches]
+        sessions = _sessions(ids, booked, cookies, budget, pacer)
+        in_couple = False
+        # The couple map (feed, when enabled): a matched individual with no
+        # sessions of their own but a seat in a couple gets the couple's
+        # sessions. The match itself (phone / e-mail / name) stands.
+        if not sessions and couple_of:
+            kids = sorted({couple_of[cid] for cid in ids if cid in couple_of})
+            sessions = _sessions(kids, booked, cookies, budget, pacer)
+            in_couple = bool(kids)
+        found.append((matches, matched_by, sessions, in_couple))
+
+    def _try_couple() -> None:
+        # An individual record already found, booking not couples therapy: only
+        # a couple file opened around this booking may take over (a child on a
+        # parent's number must not inherit the parents' couple sessions).
+        couples, sessions = _couple_sessions(it, booked, cookies, budget, pacer,
+                                             opened_near=bool(found) and not _is_couples(it))
+        if couples:
+            found.append((couples, "couple", sessions, False))
+
+    couple_failed: UpstreamError | None = None
+    for step in ((_try_couple, _try_individual) if _is_couples(it) else (_try_individual, _try_couple)):
+        try:
+            step()
+        except UpstreamError as exc:
+            if step is not _try_couple:
+                raise
+            # The couple search (base-clients) or a couple's session list
+            # failed. The other place may still hold the session; only when
+            # neither does is the failure re-raised below.
+            couple_failed = exc
+            continue
+        if found and found[-1][2]:
+            break               # this record has a session: the other is never searched
+    if couple_failed is not None and not any(f[2] for f in found):
+        # No session anywhere we could read, and one place we could NOT read:
+        # "error", never a misleading no_appointment / not_found. (The nightly
+        # feed then keeps the contact's previous row.)
+        raise couple_failed
+
+    if not found:
+        return row
+    matches, matched_by, appts, in_couple = next((f for f in found if f[2]), found[0])
     row["found"] = len(matches)
     row["ambiguous"] = len(matches) > 1
-    row["matched_by"] = matched_by if matches else None
-    if not matches:
-        return row
+    row["matched_by"] = matched_by
+    # True when the contact sits in a couple record we saw — even one without
+    # sessions, next to a reported individual record.
+    row["couple"] = in_couple or any((c.get("type") or "clients") != "clients" for f in found for c in f[0])
 
     newest = max(matches, key=lambda c: _parse_dt(_attrs(c).get("createdAt")) or datetime.min.replace(tzinfo=ET))
     created = _parse_dt(_attrs(newest).get("createdAt"))
@@ -337,30 +498,6 @@ def _check_item(it: dict, style: str | None, cookies, budget, pacer, now: dateti
     st = str(_attrs(newest).get("status") or "").strip().lower()
     row["sp_status"] = st if st in SP_STATUS else ("other" if st else None)
 
-    # 2. First appointment on/after the booking, across the matched clients
-    #    (a parent's number may book for two children).
-    appts: list[tuple[datetime, str]] = []
-
-    def _collect(client_id: str) -> None:
-        for a in _appointments(client_id, booked, cookies, budget, pacer):
-            at = _attrs(a)
-            dt = _parse_dt(at.get("startTime"))
-            if dt and dt >= booked:   # belt-and-braces on the server's timeRange
-                appts.append((dt, STATUS.get(str(at.get("attendanceStatus")), "unknown_status")))
-
-    ids = [str(c["id"]) for c in matches]
-    for cid in ids:
-        _collect(cid)
-    # 2b. Couples therapy is booked on a separate clientCouples record that the
-    #     client search never returns and that OWNS the sessions. A matched
-    #     individual with no sessions of their own but a seat in a couple gets
-    #     the couple's sessions. The match itself (phone / e-mail) stands.
-    if not appts and couple_of:
-        couples = sorted({couple_of[cid] for cid in ids if cid in couple_of})
-        for kid in couples:
-            _collect(kid)
-        row["couple"] = row["couple"] or bool(couples)
-    appts.sort(key=lambda x: x[0])
     row["appts"] = len(appts)
     if not appts:
         row["first_status"] = "no_appointment"

@@ -51,6 +51,7 @@ from ..runner import feed
 from ..safety import Pacer, RequestBudget, SafetyViolation, log
 from ..tools.check_clients import (
     ET,
+    ITEM_MAX_REQUESTS,
     LOOKAHEAD_DAYS,
     SessionExpired,
     UpstreamError,
@@ -154,7 +155,7 @@ def _load_contacts(fdo, since: date) -> tuple[list[dict], int]:
     upsert make PostgREST reject the whole batch.
     """
     raw = fdo.select(INPUT_TABLE, params={
-        "select": "hubspot_contact_id,phone_normalized,email,first_name,last_name,date_booked",
+        "select": "hubspot_contact_id,phone_normalized,email,first_name,last_name,date_booked,type_of_therapy",
         "client_status": "eq.Booked",
         "date_booked": f"gte.{since.isoformat()}",
         "order": "hubspot_contact_id",
@@ -177,6 +178,9 @@ def _load_contacts(fdo, since: date) -> tuple[list[dict], int]:
             # held in memory only, like the number and e-mail.
             "first": str(r.get("first_name") or "").strip(),
             "last": str(r.get("last_name") or "").strip(),
+            # HubSpot Type of Therapy: "Couples..." looks at the couple record
+            # first (check_clients._is_couples). Memory only, never written.
+            "therapy": str(r.get("type_of_therapy") or "").strip(),
             "booked": booked,
         })
     return items, skipped
@@ -353,9 +357,12 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
     items = recent + older
 
     # The scheduler hands every feed the same per-run ceiling. This one's work
-    # is proportional to the contact list (≤5 requests each) plus the couple
-    # map, so the ceiling is raised on the budget we were given — raised, not
-    # replaced, so the scheduler's own budget_used log line stays truthful.
+    # is proportional to the contact list (2-5 requests each on average, at
+    # most ITEM_MAX_REQUESTS; the couple re-check adds 1-2 searches only for a
+    # contact with no session) plus the couple map, so the ceiling is raised on
+    # the budget we were given — raised, not replaced, so the scheduler's own
+    # budget_used log line stays truthful. In practice RUN_DEADLINE binds first:
+    # at the 0.7-1.8 s pacing, 22 minutes is ~800 requests.
     budget.limit = max(budget.limit, 5 * len(items) + 200)
 
     cookies = cookies_from_state(settings)
@@ -385,8 +392,9 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
             cookies = cookies_from_state(settings)
             return fn(cookies)
 
-    # Couple map, once per run. Its failure is not the run's failure: without
-    # it, couples-only clients simply read "no_appointment" tonight.
+    # Couple map, once per run (off: see COUPLE_MAP_ENABLED). Its failure is not
+    # the run's failure: couples are still found per contact by _check_item's
+    # couple search (base-clients), which does not depend on the map.
     couple_of: dict[str, str] = {}
     couple_stats: Counter = Counter()
     if COUPLE_MAP_ENABLED:
@@ -403,10 +411,17 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
     results: list[dict[str, Any]] = []
     errors: Counter = Counter()
     streak = 0
-    left_unchecked = 0
+    left_unchecked, stop_reason = 0, None
     for n, it in enumerate(items):
         if time.monotonic() - started > RUN_DEADLINE.total_seconds():
-            left_unchecked = len(items) - n
+            left_unchecked, stop_reason = len(items) - n, "deadline"
+            break
+        # Never START a contact the budget could not finish (twice: a re-auth
+        # re-runs it). Hitting the hard stop mid-contact would raise a
+        # SafetyViolation and lose the whole night's rows; stopping here keeps
+        # the finished ones, like the deadline does.
+        if budget.used + 2 * ITEM_MAX_REQUESTS > budget.limit:
+            left_unchecked, stop_reason = len(items) - n, "budget"
             break
         try:
             row = with_refresh(lambda c: _check_item(it, SEARCH_STYLE, c, budget, pacer, now_et,
@@ -422,21 +437,30 @@ def _run(settings, fdo, budget: RequestBudget, pacer: Pacer, now_et: datetime) -
                 # and calling the night done would hide it until tomorrow;
                 # failing the run makes the scheduler retry in 30 minutes.
                 raise RuntimeError("consecutive client checks failed; treating as an outage") from exc
-            row = {"first_status": "error"}
+            # Never overwrite the contact's last good row with "error" (same
+            # rule as caller_check): a failed lookup says nothing about the
+            # client, and the scorecard reads a missing row exactly like an
+            # error row with nothing found ("not checked yet"). Counted in
+            # step='errors' and in the 'error' total below.
+            continue
         results.append(_table_row(it, row, stamp))
 
     for i in range(0, len(results), BATCH_SIZE):
         fdo.upsert(OUTPUT_TABLE, results[i:i + BATCH_SIZE], on_conflict="hubspot_contact_id")
 
     totals = Counter(r["first_status"] for r in results)
+    totals["error"] += sum(errors.values())       # failed lookups: previous row kept, not written
+    totals = +totals                              # drop zero counts
     for status, n in sorted(totals.items()):
         log(feed=HEALTH_FEED, step="totals", metric=status, value=n)
     for k, n in sorted(couple_stats.items()):
         log(feed=HEALTH_FEED, step="couples", metric=k, value=n)
     for k, n in sorted(errors.items()):
         log(feed=HEALTH_FEED, step="errors", error_type=k, count=n)
+    if errors:
+        log(feed=HEALTH_FEED, step="errors", status="kept_previous_row", count=sum(errors.values()))
     if left_unchecked:
-        log(feed=HEALTH_FEED, step="deadline", status="truncated", count=left_unchecked)
+        log(feed=HEALTH_FEED, step=stop_reason, status="truncated", count=left_unchecked)
     log(feed=HEALTH_FEED, step="client_check", status="ok", rows=len(results),
         count=len(items), budget_used=budget.used,
         duration_ms=int((time.monotonic() - started) * 1000))

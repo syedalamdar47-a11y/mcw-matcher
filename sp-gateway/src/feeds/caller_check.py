@@ -38,7 +38,13 @@ HEALTH_FEED = "sp_caller_check"
 WINDOW_DAYS = 35
 LOOKBACK_DAYS = 60             # extra calls read to find each caller's real first call
 RUN_DEADLINE = timedelta(minutes=20)
-BUDGET_RESERVE = 20            # one caller's worst case, twice (a re-auth retries the caller)
+# One caller's worst case, twice (a re-auth retries the caller). Worst case =
+# phone search + 3 name searches + 3 appointment lists + the couple re-check
+# (2 base-clients searches + up to 3 couple appointment lists) = 12
+# (check_callers.CALLER_MAX_REQUESTS). This feed runs on the scheduler's fixed
+# per-run budget (500, never raised here): if fly logs show step='cutoff'
+# reason='budget', raise budget.limit in _run like client_check does.
+BUDGET_RESERVE = 24
 MAX_CONSECUTIVE_ERRORS = 8
 BATCH_SIZE = 200
 MAX_ATTEMPTS_PER_NIGHT = 3

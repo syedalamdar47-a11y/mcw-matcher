@@ -46,12 +46,17 @@ from .. import config, safety, session
 from ..sink import Sink
 from .on_demand import refresh_on_demand
 from .check_clients import (
-    ET, NAME_FIELDS, SEARCH_PAGE, STATUS, SessionExpired, UpstreamError, _appointments, _attrs, _digits, _fold, _get,
-    _ID_RE, _match_couple, _parse_dt, _search_clients, out,
+    ET, NAME_FIELDS, SEARCH_PAGE, SessionExpired, UpstreamError, _attrs, _couple_sessions, _digits, _fold, _get,
+    _ID_RE, _match_couple, _parse_dt, _search_clients, _sessions, out,
 )
 
 NEW_CLIENT_BRANCHES = ("New Client", "New Client Psychiatry", "New Client Sarasota", "New Client Tampa")
 MAX_CALLERS = 600
+# The most SimplePractice requests _check makes for ONE caller: phone search +
+# 3 name searches + 3 session lists + the couple re-check (2 base-clients
+# searches + up to 3 couple session lists). main() never starts a caller the
+# budget could not finish; the nightly feed reserves twice this (re-auth).
+CALLER_MAX_REQUESTS = 12
 OUTPUT_TABLE = "sp_caller_checks"
 FIRST_STATUS = frozenset({"attended", "no_show", "cancelled", "late_cancelled", "clinician_cancelled",
                           "upcoming", "no_appointment", "not_found", "error"})
@@ -148,27 +153,35 @@ def _check(c: dict, cookies, budget, pacer, now: datetime) -> dict:
         matches = _match_couple({"ph": c["d"], "first": first, "last": last}, cookies, budget, pacer)
         matched_by = "couple" if matches else None
     matches = [x for x in matches if _ID_RE.fullmatch(str(x.get("id") or ""))]
-    row["found"] = len(matches)
-    row["ambiguous"] = len(matches) > 1
-    row["matched_by"] = matched_by if matches else None
     if not matches:
         return row
     # the newest record decides "new vs already a client" (a family member on
     # the same number may be an old client), then keep at most 3 for sessions
     newest = max(matches, key=lambda x: _parse_dt(_attrs(x).get("createdAt")) or datetime.min.replace(tzinfo=ET))
-    matches = [newest] + [x for x in matches if x is not newest][:2]
+    appts = _sessions([str(x["id"]) for x in [newest] + [x for x in matches if x is not newest][:2]],
+                      day, cookies, budget, pacer)
+    if not appts and matched_by != "couple":
+        # Couples therapy: the number (or name) found ONE partner's individual
+        # record, which has no sessions — they sit on the clientCouples record.
+        # Same re-check as check_clients._check_item; kept only if the couple
+        # record has a session on/after the call day AND was opened around the
+        # call (opened_near: a child calling from a parent's number must not
+        # inherit the parents' long-standing couple record). A failed couple
+        # search raises: "error", never a misleading no_appointment.
+        first, last = (c["names"][0] if c["names"] else ("", ""))
+        couples, couple_appts = _couple_sessions({"ph": c["d"], "first": first, "last": last}, day,
+                                                 cookies, budget, pacer, opened_near=True)
+        if couple_appts:
+            matches, matched_by, appts = couples, "couple", couple_appts
+            newest = max(matches, key=lambda x: _parse_dt(_attrs(x).get("createdAt")) or datetime.min.replace(tzinfo=ET))
+    row["found"] = len(matches)
+    row["ambiguous"] = len(matches) > 1
+    row["matched_by"] = matched_by
     created = _parse_dt(_attrs(newest).get("createdAt"))
     if created:
         row["created_rel_days"] = (created.astimezone(ET).date() - c["first"]).days
     st = str(_attrs(newest).get("status") or "").strip().lower()
     row["sp_status"] = st if st in ("active", "inactive", "prospective") else ("other" if st else None)
-    appts = []
-    for x in matches:
-        for a in _appointments(str(x["id"]), day, cookies, budget, pacer):
-            dt = _parse_dt(_attrs(a).get("startTime"))
-            if dt and dt >= day:
-                appts.append((dt, STATUS.get(str(_attrs(a).get("attendanceStatus")), "unknown_status")))
-    appts.sort(key=lambda t: t[0])
     row["appts"] = len(appts)
     if not appts:
         row["first_status"] = "no_appointment"
@@ -229,7 +242,14 @@ def main(argv: list[str]) -> int:
     errors: Counter = Counter()
     stamp = datetime.now(ET).astimezone().isoformat()
     table_rows: list[dict] = []
-    for c in callers:
+    left = 0
+    for n, c in enumerate(callers):
+        # Never START a caller the budget could not finish: hitting the hard
+        # stop mid-caller raises SafetyViolation and --write would lose every
+        # row checked so far. Stop here instead and keep them.
+        if budget.used + CALLER_MAX_REQUESTS > budget.limit:
+            left = len(callers) - n
+            break
         try:
             row = _check(c, cookies, budget, pacer, now)
         except (SessionExpired, safety.SafetyViolation):
@@ -239,8 +259,13 @@ def main(argv: list[str]) -> int:
             errors[type(exc).__name__] += 1
         totals[f"{row.get('matched_by') or 'none'}:{row['first_status']}"] += 1
         out(row)
+        if row["first_status"] == "error" and not row.get("found"):
+            # A failed lookup is printed but never written: --write must not
+            # overwrite the caller's last good row (same rule as the nightly feed).
+            continue
         table_rows.extend(table_rows_of(c, row, stamp))
-    out({"totals": dict(totals), "errors": dict(errors), "requests": budget.used})
+    out({"totals": dict(totals), "errors": dict(errors), "requests": budget.used}
+        | ({"stopped": "budget", "left_unchecked": left} if left else {}))
     if write and table_rows:
         fdo = Sink(settings, url=settings.fdo_supabase_url, key=settings.fdo_supabase_service_key)
         for i in range(0, len(table_rows), 200):
